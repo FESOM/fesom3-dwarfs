@@ -13,6 +13,13 @@ def set_item(arr, index, value):
         arr[index] = value
         return arr
 
+def add_item(arr, index, value):
+    if use_jax:
+        return arr.at[index].add(value)
+    else:
+        arr[index] += value
+        return arr
+
 # Set up environment variables for OpenMP
 os.environ["OMP_NUM_THREADS"] = "3"
 os.environ["MPI4JAX_USE_CUDA_MPI"] = "1"
@@ -38,20 +45,19 @@ npes = jnp.zeros(1, dtype=jnp.int32)  # Initialize as JAX array
 if rank == 0:
     with open(file_name, 'r') as file:
         # Read the number of processors
-        npes = jnp.array([int(file.readline().strip())], dtype=jnp.int32)
-        
+        #npes = jnp.array([int(file.readline().strip())], dtype=jnp.int32)
+        npes=jnp.int32(int(file.readline().strip()))
         # Allocate partit%part array
-        part = jnp.zeros(npes[0] + 1, dtype=jnp.int32)
+        part = jnp.zeros(npes + 1, dtype=jnp.int32)
         part=set_item(part,0,1)
         
         # Read the remaining integers into part(2:npes+1)
         remaining_integers = list(map(int, file.readline().strip().split()))
-        part = set_item(part, slice(1, npes[0] + 1), jnp.array(remaining_integers, dtype=jnp.int32))
+        part = set_item(part, slice(1, npes+ 1), jnp.array(remaining_integers, dtype=jnp.int32))
 
         # Accumulate the part array
-        for i in range(1, npes[0] + 1):
-            part = part.at[i].add(part[i - 1])
-
+        for i in range(1, npes + 1):
+            part = add_item(part, i, part[i - 1])
 
 # Broadcast npes to all processes
 npes = bcast(npes, root=0, comm=comm)
