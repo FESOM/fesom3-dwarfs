@@ -1,11 +1,33 @@
 import os
 import jax
+import pytest
 import jax.numpy as jnp
 from mpi4py import MPI
 from mpi4jax import send, recv, bcast
 from jax import random
-use_jax=True
+from array_interfaces import array_factory, JaxStyleNumpyArray
+import numpy as np
+@pytest.mark.parametrize("backend", ["numpy", "numpy-immutable", "jax"])
+@pytest.mark.parametrize("data, slice_idx, set_value", [
+    ([1, 2, 3, 4, 5], slice(1, 4), 10),
+    ([1.0, 2.0, 3.0, 4.0, 5.0], slice(0, 3), 20.0),
+    ([1, 2, 3, 4, 5], slice(2, 5), 30),
+    ([1.0, 2.0, 3.0, 4.0, 5.0], slice(1, 4), 40.0)
+])
 
+def test_array_slicing_and_setting(backend, data, slice_idx, set_value):
+    arr = array_factory(data, backend=backend)
+    if backend == "jax":
+        arr = arr.at[slice_idx].set(set_value)
+        assert jnp.all(arr[slice_idx] == set_value)
+    elif backend == "numpy-immutable":
+        arr = arr.at[slice_idx].set(set_value)
+        assert np.all(arr[slice_idx] == set_value)
+    else:
+        arr.at[slice_idx].set(set_value)
+        assert np.all(arr[slice_idx] == set_value)
+
+use_jax=True
 def set_item(arr, index, value):
     if use_jax:
         return arr.at[index].set(value)
@@ -19,7 +41,7 @@ def add_item(arr, index, value):
     else:
         arr[index] += value
         return arr
-
+backend="jax"
 # Set up environment variables for OpenMP
 os.environ["OMP_NUM_THREADS"] = "3"
 os.environ["MPI4JAX_USE_CUDA_MPI"] = "1"
@@ -48,16 +70,16 @@ if rank == 0:
         #npes = jnp.array([int(file.readline().strip())], dtype=jnp.int32)
         npes=jnp.int32(int(file.readline().strip()))
         # Allocate partit%part array
-        part = jnp.zeros(npes + 1, dtype=jnp.int32)
-        part=set_item(part,0,1)
+        part = array_factory(np.zeros(npes+1, dtype=int), backend=backend)
+        part = part.at[0].set(1)
         
         # Read the remaining integers into part(2:npes+1)
         remaining_integers = list(map(int, file.readline().strip().split()))
-        part = set_item(part, slice(1, npes+ 1), jnp.array(remaining_integers, dtype=jnp.int32))
+        part = part.at[slice(1, npes+ 1)].set(jnp.array(remaining_integers, dtype=jnp.int32))
 
         # Accumulate the part array
         for i in range(1, npes + 1):
-            part = add_item(part, i, part[i - 1])
+            part = part.at[i].add(part[i - 1])
 
 # Broadcast npes to all processes
 npes = bcast(npes, root=0, comm=comm)
