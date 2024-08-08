@@ -5,8 +5,12 @@ import jax.numpy as jnp
 from mpi4py import MPI
 from mpi4jax import send, recv, bcast
 from jax import random
+from jax import ops
 from array_interfaces import array_factory, JaxStyleNumpyArray
 import numpy as np
+
+
+force_rotation=True
 @pytest.mark.parametrize("backend", ["numpy", "numpy-immutable", "jax"])
 @pytest.mark.parametrize("data, slice_idx, set_value", [
     ([1, 2, 3, 4, 5], slice(1, 4), 10),
@@ -70,29 +74,165 @@ if rank == 0:
         #npes = jnp.array([int(file.readline().strip())], dtype=jnp.int32)
         npes=jnp.int32(int(file.readline().strip()))
         # Allocate partit%part array
-        part = array_factory(np.zeros(npes+1, dtype=int), backend=backend)
+        part = jnp.zeros(npes+1, dtype=jnp.int32)
         part = part.at[0].set(1)
         
         # Read the remaining integers into part(2:npes+1)
         remaining_integers = list(map(int, file.readline().strip().split()))
         part = part.at[slice(1, npes+ 1)].set(jnp.array(remaining_integers, dtype=jnp.int32))
-
         # Accumulate the part array
         for i in range(1, npes + 1):
             part = part.at[i].add(part[i - 1])
 
 # Broadcast npes to all processes
-npes = bcast(npes, root=0, comm=comm)
+npes = comm.bcast(npes, root=0)
 
 # Initialize part on other ranks
 if rank != 0:
-    part = jnp.zeros(npes[0] + 1, dtype=jnp.int32)
-
+    part = jnp.zeros(npes + 1, dtype=jnp.int32)
 # Broadcast the part array to all processes
-part = bcast(part, root=0, comm=comm)
-
+part = comm.bcast(part, root=0)
 # Print the part array in each process for debugging
-print(f"Process {rank}: part = {part}")
+#print(f"Process {rank}: part = {part}")
+##############################################################################
+# READ MESH PARTITIONING
+##############################################################################
+file_name = dist_mesh_dir.strip() + 'my_list'+str(rank).zfill(5) + '.out'
+with open(file_name, 'r') as file:
+    # Read the value of n
+    n = int(file.readline().strip())
+
+    # Read partit%myDim_nod2D
+    partit_myDim_nod2D = jnp.int32(file.readline().strip())
+
+    # Read partit%eDim_nod2D
+    partit_eDim_nod2D = jnp.int32(file.readline().strip())
+
+    # Allocate partit%myList_nod2D
+    partit_myList_nod2D = jnp.zeros(partit_myDim_nod2D + partit_eDim_nod2D, dtype=jnp.int32)
+
+    count = 0
+    while count < partit_myList_nod2D.size:
+        line = file.readline().strip()  # Assuming 'file' is already an open file object
+        numbers = map(int, line.split())
+        for num in numbers:
+            if count < partit_myList_nod2D.size:
+                partit_myList_nod2D = partit_myList_nod2D.at[count].set(num)
+                count += 1
+            else:
+                break
+
+    # Read partit%myDim_elem2D
+    partit_myDim_elem2D = jnp.int32(file.readline().strip())
+
+    # Read partit%eDim_elem2D
+    partit_eDim_elem2D = jnp.int32(file.readline().strip())
+
+    # Read partit%eXDim_elem2D
+    partit_eXDim_elem2D = jnp.int32(file.readline().strip())
+
+    # Allocate partit%myList_elem2D
+    partit_myList_elem2D = jnp.zeros(partit_myDim_elem2D + partit_eDim_elem2D + partit_eXDim_elem2D, dtype=jnp.int32)
+
+    # Read partit%myList_elem2D
+    count = 0
+    while count < partit_myList_elem2D.size:
+        line = file.readline().strip()  # Assuming 'file' is already an open file object
+        numbers = map(int, line.split())
+        for num in numbers:
+            if count < partit_myList_elem2D.size:
+                partit_myList_elem2D = partit_myList_elem2D.at[count].set(num)
+                count += 1
+            else:
+                break
+
+    # Read partit%myDim_edge2D
+    partit_myDim_edge2D = jnp.int32(file.readline().strip())
+
+    # Read partit%eDim_edge2D
+    partit_eDim_edge2D = jnp.int32(file.readline().strip())
+
+    # Allocate partit%myList_edge2D
+    partit_myList_edge2D = jnp.zeros(partit_myDim_edge2D + partit_eDim_edge2D, dtype=jnp.int32)
+
+    # Read partit%myList_edge2D
+    count = 0
+    while count < partit_myList_edge2D.size:
+        line = file.readline().strip()  # Assuming 'file' is already an open file object
+        numbers = map(int, line.split())
+        for num in numbers:
+            if count < partit_myList_edge2D.size:
+                partit_myList_edge2D = partit_myList_edge2D.at[count].set(num)
+                count += 1
+            else:
+                break
+##############################################################################
+# Read 2D node data
+mesh_nod2D = part[npes] - 1
+# Allocate mesh_coord_nod2D with JAX
+mesh_coord_nod2D = jnp.zeros((2, partit_myDim_nod2D + partit_eDim_nod2D), dtype=jnp.float32)
+error_status = 0
+chunk_size=10000
+mapping = jnp.zeros(chunk_size,     dtype=jnp.int32)
+ibuff   = np.zeros((chunk_size, 2), dtype=np.int32)
+rbuff   = np.zeros((chunk_size, 2), dtype=np.float64)
+mesh_check=0
+file_name = meshpath.strip() + '/nod2d.out'
+with open(file_name, 'r') as file:
+    if (rank==0):
+        n = int(file.readline().strip())  # Read nod2D
+        if n != mesh_nod2D:
+            error_status = 1  # Set the error status for consistency between part and nod2D
+        print('reading', file_name)
+
+    # Broadcast error status to all processes
+    error_status = MPI.COMM_WORLD.bcast(error_status, root=0)
+
+    if error_status != 0:
+        print(n)
+        print('error: nod2D != part[npes]')
+        MPI.COMM_WORLD.Abort(1)  # Stop execution if there's an error
+    for nchunk in range((mesh_nod2D - 1) // chunk_size + 1):
+        # Create the mapping for the current chunk
+        mapping = mapping.at[:chunk_size].set(0)
+        for n in range(partit_myDim_nod2D + partit_eDim_nod2D):
+            ipos = (partit_myList_nod2D[n] - 1) // chunk_size
+            if ipos == nchunk:
+                iofs = partit_myList_nod2D[n] - nchunk * chunk_size
+                mapping = mapping.at[iofs].set(n)
+
+    # Read the chunk into the buffers
+    k = min(chunk_size, mesh_nod2D - nchunk * chunk_size)
+    if rank == 0:
+        for n in range(k):
+            line = file.readline().strip().split()
+            ibuff[n, 0], rbuff[n, 0], rbuff[n, 1], ibuff[n, 1] = int(line[0]), float(line[1]), float(line[2]), int(
+                line[3])
+
+            # Apply the offset for longitude shift
+            offset = 0.0
+            if rbuff[n, 0] > 180.0:
+                offset = -360.0
+            elif rbuff[n, 0] < -180.0:
+                offset = 360.0
+
+    # Broadcast the buffers
+    rbuff[:, 0] = comm.bcast(rbuff[:, 0], root=0)
+    rbuff[:, 1] = comm.bcast(rbuff[:, 1], root=0)
+    ibuff[:, 1] = comm.bcast(ibuff[:, 1], root=0)
+
+    # Fill the local arrays
+    for n in range(k):
+        x = rbuff[n, 0] * np.pi/180.
+        y = rbuff[n, 1] * np.pi/180.
+
+        if mapping[n] > 0:
+            mesh_check += 1
+            mesh_coord_nod2D = mesh_coord_nod2D.at[0, mapping[n]-1].set(x)
+            mesh_coord_nod2D = mesh_coord_nod2D.at[1, mapping[n]-1].set(y)
+
+#mesh_check_total = comm.allreduce(mesh_check, op=MPI.SUM)
+print(mesh_check-partit_myDim_nod2D - partit_eDim_nod2D)
 
 # Finalize MPI
 comm.Barrier()
