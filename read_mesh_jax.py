@@ -172,7 +172,8 @@ mesh_nod2D = part[npes] - 1
 # Allocate mesh_coord_nod2D with JAX
 mesh_coord_nod2D = jnp.zeros((2, partit_myDim_nod2D + partit_eDim_nod2D), dtype=jnp.float32)
 error_status = 0
-chunk_size=10000
+# like in Fortran we read the mesh in chunks to avoid loading large arrays into memory
+chunk_size   = 10000
 mapping = jnp.zeros(chunk_size,     dtype=jnp.int32)
 ibuff   = np.zeros((chunk_size, 2), dtype=np.int32)
 rbuff   = np.zeros((chunk_size, 2), dtype=np.float64)
@@ -194,46 +195,46 @@ with open(file_name, 'r') as file:
         MPI.COMM_WORLD.Abort(1)  # Stop execution if there's an error
     for nchunk in range((mesh_nod2D - 1) // chunk_size + 1):
         # Create the mapping for the current chunk
-        mapping = mapping.at[:chunk_size].set(0)
+        mapping = mapping.at[:chunk_size].set(-1)
         for n in range(partit_myDim_nod2D + partit_eDim_nod2D):
             ipos = (partit_myList_nod2D[n] - 1) // chunk_size
             if ipos == nchunk:
-                iofs = partit_myList_nod2D[n] - nchunk * chunk_size
+                iofs = partit_myList_nod2D[n] - nchunk * chunk_size-1
                 mapping = mapping.at[iofs].set(n)
 
-    # Read the chunk into the buffers
-    k = min(chunk_size, mesh_nod2D - nchunk * chunk_size)
-    if rank == 0:
-        for n in range(k):
-            line = file.readline().strip().split()
-            ibuff[n, 0], rbuff[n, 0], rbuff[n, 1], ibuff[n, 1] = int(line[0]), float(line[1]), float(line[2]), int(
+        # Read the chunk into the buffers
+        k = min(chunk_size, mesh_nod2D - nchunk * chunk_size)
+        if rank == 0:
+            for n in range(k):
+                line = file.readline().strip().split()
+                ibuff[n, 0], rbuff[n, 0], rbuff[n, 1], ibuff[n, 1] = int(line[0]), float(line[1]), float(line[2]), int(
                 line[3])
 
-            # Apply the offset for longitude shift
-            offset = 0.0
-            if rbuff[n, 0] > 180.0:
-                offset = -360.0
-            elif rbuff[n, 0] < -180.0:
-                offset = 360.0
+                # Apply the offset for longitude shift
+                offset = 0.0
+                if rbuff[n, 0] > 180.0:
+                    offset = -360.0
+                elif rbuff[n, 0] < -180.0:
+                    offset = 360.0
 
-    # Broadcast the buffers
-    rbuff[:, 0] = comm.bcast(rbuff[:, 0], root=0)
-    rbuff[:, 1] = comm.bcast(rbuff[:, 1], root=0)
-    ibuff[:, 1] = comm.bcast(ibuff[:, 1], root=0)
+        # Broadcast the buffers
+        rbuff[:, 0] = comm.bcast(rbuff[:, 0], root=0)
+        rbuff[:, 1] = comm.bcast(rbuff[:, 1], root=0)
+        ibuff[:, 1] = comm.bcast(ibuff[:, 1], root=0)
 
-    # Fill the local arrays
-    for n in range(k):
-        x = rbuff[n, 0] * np.pi/180.
-        y = rbuff[n, 1] * np.pi/180.
+        # Fill the local arrays
+        for n in range(k):
+            x = rbuff[n, 0] * np.pi/180.
+            y = rbuff[n, 1] * np.pi/180.
 
-        if mapping[n] > 0:
-            mesh_check += 1
-            mesh_coord_nod2D = mesh_coord_nod2D.at[0, mapping[n]-1].set(x)
-            mesh_coord_nod2D = mesh_coord_nod2D.at[1, mapping[n]-1].set(y)
+            if mapping[n] >= 0:
+                mesh_check += 1
+                mesh_coord_nod2D = mesh_coord_nod2D.at[0, mapping[n]].set(x)
+                mesh_coord_nod2D = mesh_coord_nod2D.at[1, mapping[n]].set(y)
 
 #mesh_check_total = comm.allreduce(mesh_check, op=MPI.SUM)
 print(mesh_check-partit_myDim_nod2D - partit_eDim_nod2D)
-
+#print(partit_myList_nod2D.min())
 # Finalize MPI
 comm.Barrier()
 MPI.Finalize()
