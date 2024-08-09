@@ -175,8 +175,8 @@ error_status = 0
 # like in Fortran we read the mesh in chunks to avoid loading large arrays into memory
 chunk_size   = 10000
 mapping = jnp.zeros(chunk_size,     dtype=jnp.int32)
-ibuff   = np.zeros((chunk_size, 2), dtype=np.int32)
-rbuff   = np.zeros((chunk_size, 2), dtype=np.float64)
+ibuff   = np.zeros((chunk_size, 4), dtype=np.int32)
+rbuff   = np.zeros((chunk_size, 3), dtype=np.float64)
 mesh_check=0
 file_name = meshpath.strip() + '/nod2d.out'
 with open(file_name, 'r') as file:
@@ -234,6 +234,75 @@ with open(file_name, 'r') as file:
 
 #mesh_check_total = comm.allreduce(mesh_check, op=MPI.SUM)
 print(mesh_check-partit_myDim_nod2D - partit_eDim_nod2D)
+##############################################################################
+# Read 2D element data
+mesh_elem2D = jnp.zeros((3, partit_myDim_elem2D + partit_eDim_elem2D + partit_eXDim_elem2D), dtype=jnp.int32)
+file_name = meshpath.strip() + '/elem2d.out'
+with open(file_name, 'r') as file:
+    mesh_elem2D_total = jnp.int32(0)
+    if rank == 0:
+        mesh_elem2D_total = jnp.int32(file.readline().strip())  # Read the total number of elem2D
+        print('reading', file_name)
+
+    # Broadcast the total number of elem2D to all processes
+    mesh_elem2D_total = comm.bcast(mesh_elem2D_total, root=0)
+
+    # Loop over chunks and process the data
+    for nchunk in range((mesh_elem2D_total - 1) // chunk_size + 1):
+        mapping = mapping.at[:chunk_size].set(-1)
+
+        for n in range(partit_myDim_elem2D + partit_eDim_elem2D + partit_eXDim_elem2D):
+            ipos = (partit_myList_elem2D[n] - 1) // chunk_size
+            if ipos == nchunk:
+                iofs = partit_myList_elem2D[n] - nchunk * chunk_size - 1
+                mapping = mapping.at[iofs].set(n)
+
+    k = min(chunk_size, mesh_elem2D_total - nchunk * chunk_size)
+    if rank == 0:
+        for n in range(k):
+            line = file.readline().strip().split()
+            ibuff[n, 0]=int(line[0])-1
+            ibuff[n, 1]=int(line[1])-1
+            ibuff[n, 2]=int(line[2])-1
+
+    # Broadcast the buffers
+    ibuff[:, 0] = comm.bcast(ibuff[:, 0], root=0)
+    ibuff[:, 1] = comm.bcast(ibuff[:, 1], root=0)
+    ibuff[:, 2] = comm.bcast(ibuff[:, 2], root=0)
+
+    # Fill the local arrays
+    for n in range(k):
+        if mapping[n] >= 0:
+            mesh_elem2D = mesh_elem2D.at[0, mapping[n]].set(ibuff[n, 0])
+            mesh_elem2D = mesh_elem2D.at[1, mapping[n]].set(ibuff[n, 1])
+            mesh_elem2D = mesh_elem2D.at[2, mapping[n]].set(ibuff[n, 2])
+
+    # Convert global to local numbering
+    for nchunk in range((mesh_elem2D_total - 1) // chunk_size + 1):
+        mapping = mapping.at[:chunk_size].set(0)
+
+        for n in range(partit_myDim_nod2D + partit_eDim_nod2D):
+            ipos = (partit_myList_nod2D[n]) // chunk_size
+            if ipos == nchunk:
+                iofs = partit_myList_nod2D[n] - nchunk * chunk_size - 1
+                mapping = mapping.at[iofs].set(n)
+
+        for n in range(partit_myDim_elem2D + partit_eDim_elem2D + partit_eXDim_elem2D):
+            for m in range(3):
+                nn = mesh_elem2D[m, n]
+                ipos = (nn) // chunk_size
+                if ipos == nchunk:
+                    iofs = nn - nchunk * chunk_size - 1
+                    mesh_elem2D = mesh_elem2D.at[m, n].set(-mapping[iofs]-1)
+
+    mesh_elem2D = -mesh_elem2D-1
+
+print(mesh_elem2D.min(), mesh_elem2D.max())
+if rank == 0:
+    print("elements are read")
+
+
+
 #print(partit_myList_nod2D.min())
 # Finalize MPI
 comm.Barrier()
