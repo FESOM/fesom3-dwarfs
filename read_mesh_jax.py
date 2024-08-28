@@ -301,10 +301,238 @@ print(mesh_elem2D.min(), mesh_elem2D.max())
 if rank == 0:
     print("elements are read")
 
+# Read 3D auxiliary data
+file_name = meshpath.strip() + '/aux3d.out'
+mesh_nl = jnp.zeros(1, dtype=jnp.int32)
+with open(file_name, 'r') as file:
+    if rank == 0:
+        mesh_nl = int(file.readline().strip())  # Read the number of levels
+    # Broadcast the number of levels to all processes
+    mesh_nl = comm.bcast(mesh_nl, root=0)
+
+    # Check if the number of levels is less than 3
+    if mesh_nl < 3:
+        if rank == 0:
+            print("!!!Number of levels is less than 3, model will stop!!!")
+        MPI.COMM_WORLD.Abort(1)  # Stop execution
+
+    # Allocate the array for storing the standard depths
+    mesh_zbar = jnp.zeros(mesh_nl, dtype=jnp.float32)
+
+    # Read the standard depths on the root process
+    if rank == 0:
+        file.readline()  # Skip the first line (already read)
+        mesh_zbar = jnp.array([float(val) for val in file.readline().strip().split()])
+
+    # Broadcast the zbar array to all processes
+    mesh_zbar = comm.bcast(mesh_zbar, root=0)
+
+    # Ensure zbar is negative
+    if mesh_zbar[1] > 0:
+        mesh_zbar = -mesh_zbar
+
+    # Allocate the array for mid-depths of cells
+    mesh_Z = 0.5 * (mesh_zbar[:-1] + mesh_zbar[1:])
+
+    # Allocate the array for depth information
+    mesh_depth = jnp.zeros(partit_myDim_nod2D + partit_eDim_nod2D, dtype=jnp.float32)
+
+    # Initialize mesh_check
+    mesh_check = 0
+
+    # Process the data in chunks
+    for nchunk in range((mesh_nod2D - 1) // chunk_size + 1):
+        mapping = jnp.zeros(chunk_size, dtype=jnp.int32)
+
+    # Create the mapping for the current chunk
+    for n in range(partit_myDim_nod2D + partit_eDim_nod2D):
+        ipos = (partit_myList_nod2D[n] - 1) // chunk_size
+        if ipos == nchunk:
+            iofs = partit_myList_nod2D[n] - nchunk * chunk_size - 1
+            mapping = mapping.at[iofs].set(n + 1)  # Using 1-based indexing similar to Fortran
+
+    # Determine the number of elements to read in this chunk
+    k = min(chunk_size, mesh_nod2D - nchunk * chunk_size)
+
+    # Read the depth values into the buffer on the root process
+    if rank == 0:
+        rbuff = np.zeros((k, 1), dtype=np.float32)
+        for n in range(k):
+            rbuff[n, 0] = float(file.readline().strip())
+
+        # Broadcast the buffer to all processes
+    rbuff = comm.bcast(rbuff, root=0)
+    count=0
+    # Process the depths
+    for n in range(k):
+        x = rbuff[n, 0]
+        if x > 0:
+            x = -x  # Depths must be negative
+        if x > -20.:  # Adjust based on threshold
+            x = -20.
+        if mapping[n] > 0:
+            mesh_check += 1
+            mesh_depth = mesh_depth.at[mapping[n] - 1].set(x)  # Adjust back to 0-based indexing
+            count=count+1
+
+# ==============================
+# Communication information
+# Every process reads its file
+# ==============================
+MAX_NEIGHBOR_PARTITIONS=10
 
 
-#print(partit_myList_nod2D.min())
-# Finalize MPI
+class CommunicationData:
+    def __init__(self):
+        self.rPEnum = None
+        self.rPE = None
+        self.rptr = None
+        self.rlist = None
+        self.sPEnum = None
+        self.sPE = None
+        self.sptr = None
+        self.slist = None
+
+
+com_nod2D = CommunicationData()
+com_elem2D = CommunicationData()
+com_elem2D_full = CommunicationData()
+max_neighbor_partitions=10
+# Set file paths
+file_name = f"{dist_mesh_dir.strip()}/com_info{str(rank).zfill(5)}.out"
+with open(file_name, 'r') as file:
+    # Read the number of nodes
+    n = int(file.readline().strip())
+
+    # Read and validate rPEnum for nodes
+    com_nod2D_rPEnum = int(file.readline().strip())
+    if com_nod2D_rPEnum > max_neighbor_partitions:
+        raise ValueError("Increase MAX_NEIGHBOR_PARTITIONS in gen_modules_partitioning.F90 and recompile")
+
+    # Read rPE
+    com_nod2D_rPE = jnp.array(list(map(int, file.readline().strip().split()))[:com_nod2D_rPEnum])
+
+    # Read rptr
+    com_nod2D_rptr = jnp.array(list(map(int, file.readline().strip().split()))[:com_nod2D_rPEnum + 1])
+
+    # Allocate and read rlist
+    com_nod2D_rlist = jnp.zeros(partit_eDim_nod2D, dtype=jnp.int32)
+    count = 0
+    while count < partit_eDim_nod2D:
+        values = list(map(int, file.readline().strip().split()))
+        length = len(values)
+        com_nod2D_rlist = com_nod2D_rlist.at[count:count + length].set(jnp.array(values))
+        count += length
+
+    # Read and validate sPEnum for nodes
+    com_nod2D_sPEnum = int(file.readline().strip())
+    if com_nod2D_sPEnum > max_neighbor_partitions:
+        raise ValueError("Increase MAX_NEIGHBOR_PARTITIONS in gen_modules_partitioning.F90 and recompile")
+
+    # Read sPE
+    com_nod2D_sPE = jnp.array(list(map(int, file.readline().strip().split()))[:com_nod2D_sPEnum])
+
+    # Read sptr
+    com_nod2D_sptr = jnp.array(list(map(int, file.readline().strip().split()))[:com_nod2D_sPEnum + 1])
+
+    # Allocate and read slist
+    n_slist = com_nod2D_sptr[-1] - 1
+    com_nod2D_slist = jnp.zeros(n_slist, dtype=jnp.int32)
+    count = 0
+    while count < n_slist:
+        values = list(map(int, file.readline().strip().split()))
+        length = len(values)
+        com_nod2D_slist = com_nod2D_slist.at[count:count + length].set(jnp.array(values))
+        count += length
+
+    # Read and validate rPEnum for elements
+    com_elem2D_rPEnum = int(file.readline().strip())
+    if com_elem2D_rPEnum > max_neighbor_partitions:
+        raise ValueError("Increase MAX_NEIGHBOR_PARTITIONS in gen_modules_partitioning.F90 and recompile")
+
+    # Read rPE
+    com_elem2D_rPE = jnp.array(list(map(int, file.readline().strip().split()))[:com_elem2D_rPEnum])
+
+    # Read rptr
+    com_elem2D_rptr = jnp.array(list(map(int, file.readline().strip().split()))[:com_elem2D_rPEnum + 1])
+
+    # Allocate and read rlist
+    com_elem2D_rlist = jnp.zeros(partit_eDim_elem2D, dtype=jnp.int32)
+    count = 0
+    while count < partit_eDim_elem2D:
+        values = list(map(int, file.readline().strip().split()))
+        length = len(values)
+        com_elem2D_rlist = com_elem2D_rlist.at[count:count + length].set(jnp.array(values))
+        count += length
+
+    # Read and validate sPEnum for elements
+    com_elem2D_sPEnum = int(file.readline().strip())
+    if com_elem2D_sPEnum > max_neighbor_partitions:
+        raise ValueError("Increase MAX_NEIGHBOR_PARTITIONS in gen_modules_partitioning.F90 and recompile")
+
+    # Read sPE
+    com_elem2D_sPE = jnp.array(list(map(int, file.readline().strip().split()))[:com_elem2D_sPEnum])
+
+    # Read sptr
+    com_elem2D_sptr = jnp.array(list(map(int, file.readline().strip().split()))[:com_elem2D_sPEnum + 1])
+
+    # Allocate and read slist
+    n_slist = com_elem2D_sptr[-1] - 1
+    com_elem2D_slist = jnp.zeros(n_slist, dtype=jnp.int32)
+    count = 0
+    while count < n_slist:
+        values = list(map(int, file.readline().strip().split()))
+        length = len(values)
+        com_elem2D_slist = com_elem2D_slist.at[count:count + length].set(jnp.array(values))
+        count += length
+
+    # Read and validate rPEnum for full elements
+    com_elem2D_full_rPEnum = int(file.readline().strip())
+    if com_elem2D_full_rPEnum > max_neighbor_partitions:
+        raise ValueError("Increase MAX_NEIGHBOR_PARTITIONS in gen_modules_partitioning.F90 and recompile")
+
+    # Read rPE
+    com_elem2D_full_rPE = jnp.array(list(map(int, file.readline().strip().split()))[:com_elem2D_full_rPEnum])
+
+    # Read rptr
+    com_elem2D_full_rptr = jnp.array(list(map(int, file.readline().strip().split()))[:com_elem2D_full_rPEnum + 1])
+
+    # Allocate and read rlist
+    com_elem2D_full_rlist = jnp.zeros(partit_eDim_elem2D + partit_eXDim_elem2D, dtype=jnp.int32)
+    count = 0
+    while count < partit_eDim_elem2D + partit_eXDim_elem2D:
+        values = list(map(int, file.readline().strip().split()))
+        length = len(values)
+        com_elem2D_full_rlist = com_elem2D_full_rlist.at[count:count + length].set(jnp.array(values))
+        count += length
+
+    # Read and validate sPEnum for full elements
+    com_elem2D_full_sPEnum = int(file.readline().strip())
+    if com_elem2D_full_sPEnum > max_neighbor_partitions:
+        raise ValueError("Increase MAX_NEIGHBOR_PARTITIONS in gen_modules_partitioning.F90 and recompile")
+
+    # Read sPE
+    com_elem2D_full_sPE = jnp.array(list(map(int, file.readline().strip().split()))[:com_elem2D_full_sPEnum])
+
+    # Read sptr
+    com_elem2D_full_sptr = jnp.array(list(map(int, file.readline().strip().split()))[:com_elem2D_full_sPEnum + 1])
+
+    # Allocate and read slist
+    n_slist = com_elem2D_full_sptr[-1] - 1
+    com_elem2D_full_slist = jnp.zeros(n_slist, dtype=jnp.int32)
+    count = 0
+    while count < n_slist:
+        values = list(map(int, file.readline().strip().split()))
+        length = len(values)
+        com_elem2D_full_slist = com_elem2D_full_slist.at[count:count + length].set(jnp.array(values))
+        count += length
+
+if rank == 0:
+    print("Communication arrays are read")
+    
+del rbuff
+del ibuff
+del mapping
+print(rank, partit_eDim_nod2D, com_nod2D_rlist)
 comm.Barrier()
 MPI.Finalize()
-
