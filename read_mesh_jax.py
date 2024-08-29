@@ -9,43 +9,9 @@ from jax import ops
 from array_interfaces import array_factory, JaxStyleNumpyArray
 import numpy as np
 
+force_rotation = True
 
-force_rotation=True
-@pytest.mark.parametrize("backend", ["numpy", "numpy-immutable", "jax"])
-@pytest.mark.parametrize("data, slice_idx, set_value", [
-    ([1, 2, 3, 4, 5], slice(1, 4), 10),
-    ([1.0, 2.0, 3.0, 4.0, 5.0], slice(0, 3), 20.0),
-    ([1, 2, 3, 4, 5], slice(2, 5), 30),
-    ([1.0, 2.0, 3.0, 4.0, 5.0], slice(1, 4), 40.0)
-])
 
-def test_array_slicing_and_setting(backend, data, slice_idx, set_value):
-    arr = array_factory(data, backend=backend)
-    if backend == "jax":
-        arr = arr.at[slice_idx].set(set_value)
-        assert jnp.all(arr[slice_idx] == set_value)
-    elif backend == "numpy-immutable":
-        arr = arr.at[slice_idx].set(set_value)
-        assert np.all(arr[slice_idx] == set_value)
-    else:
-        arr.at[slice_idx].set(set_value)
-        assert np.all(arr[slice_idx] == set_value)
-
-use_jax=True
-def set_item(arr, index, value):
-    if use_jax:
-        return arr.at[index].set(value)
-    else:
-        arr[index] = value
-        return arr
-
-def add_item(arr, index, value):
-    if use_jax:
-        return arr.at[index].add(value)
-    else:
-        arr[index] += value
-        return arr
-backend="jax"
 # Set up environment variables for OpenMP
 os.environ["OMP_NUM_THREADS"] = "3"
 os.environ["MPI4JAX_USE_CUDA_MPI"] = "1"
@@ -71,15 +37,15 @@ npes = jnp.zeros(1, dtype=jnp.int32)  # Initialize as JAX array
 if rank == 0:
     with open(file_name, 'r') as file:
         # Read the number of processors
-        #npes = jnp.array([int(file.readline().strip())], dtype=jnp.int32)
-        npes=jnp.int32(int(file.readline().strip()))
+        # npes = jnp.array([int(file.readline().strip())], dtype=jnp.int32)
+        npes = jnp.int32(int(file.readline().strip()))
         # Allocate partit%part array
-        part = jnp.zeros(npes+1, dtype=jnp.int32)
+        part = jnp.zeros(npes + 1, dtype=jnp.int32)
         part = part.at[0].set(1)
-        
+
         # Read the remaining integers into part(2:npes+1)
         remaining_integers = list(map(int, file.readline().strip().split()))
-        part = part.at[slice(1, npes+ 1)].set(jnp.array(remaining_integers, dtype=jnp.int32))
+        part = part.at[slice(1, npes + 1)].set(jnp.array(remaining_integers, dtype=jnp.int32))
         # Accumulate the part array
         for i in range(1, npes + 1):
             part = part.at[i].add(part[i - 1])
@@ -93,11 +59,11 @@ if rank != 0:
 # Broadcast the part array to all processes
 part = comm.bcast(part, root=0)
 # Print the part array in each process for debugging
-#print(f"Process {rank}: part = {part}")
+# print(f"Process {rank}: part = {part}")
 ##############################################################################
 # READ MESH PARTITIONING
 ##############################################################################
-file_name = dist_mesh_dir.strip() + 'my_list'+str(rank).zfill(5) + '.out'
+file_name = dist_mesh_dir.strip() + 'my_list' + str(rank).zfill(5) + '.out'
 with open(file_name, 'r') as file:
     # Read the value of n
     n = int(file.readline().strip())
@@ -173,14 +139,14 @@ mesh_nod2D = part[npes] - 1
 mesh_coord_nod2D = jnp.zeros((2, partit_myDim_nod2D + partit_eDim_nod2D), dtype=jnp.float32)
 error_status = 0
 # like in Fortran we read the mesh in chunks to avoid loading large arrays into memory
-chunk_size   = 10000
-mapping = jnp.zeros(chunk_size,     dtype=jnp.int32)
-ibuff   = np.zeros((chunk_size, 4), dtype=np.int32)
-rbuff   = np.zeros((chunk_size, 3), dtype=np.float64)
-mesh_check=0
+chunk_size = 10000
+mapping = jnp.zeros(chunk_size, dtype=jnp.int32)
+ibuff = np.zeros((chunk_size, 4), dtype=np.int32)
+rbuff = np.zeros((chunk_size, 3), dtype=np.float64)
+mesh_check = 0
 file_name = meshpath.strip() + '/nod2d.out'
 with open(file_name, 'r') as file:
-    if (rank==0):
+    if (rank == 0):
         n = int(file.readline().strip())  # Read nod2D
         if n != mesh_nod2D:
             error_status = 1  # Set the error status for consistency between part and nod2D
@@ -199,7 +165,7 @@ with open(file_name, 'r') as file:
         for n in range(partit_myDim_nod2D + partit_eDim_nod2D):
             ipos = (partit_myList_nod2D[n] - 1) // chunk_size
             if ipos == nchunk:
-                iofs = partit_myList_nod2D[n] - nchunk * chunk_size-1
+                iofs = partit_myList_nod2D[n] - nchunk * chunk_size - 1
                 mapping = mapping.at[iofs].set(n)
 
         # Read the chunk into the buffers
@@ -208,7 +174,7 @@ with open(file_name, 'r') as file:
             for n in range(k):
                 line = file.readline().strip().split()
                 ibuff[n, 0], rbuff[n, 0], rbuff[n, 1], ibuff[n, 1] = int(line[0]), float(line[1]), float(line[2]), int(
-                line[3])
+                    line[3])
 
                 # Apply the offset for longitude shift
                 offset = 0.0
@@ -224,16 +190,16 @@ with open(file_name, 'r') as file:
 
         # Fill the local arrays
         for n in range(k):
-            x = rbuff[n, 0] * np.pi/180.
-            y = rbuff[n, 1] * np.pi/180.
+            x = rbuff[n, 0] * np.pi / 180.
+            y = rbuff[n, 1] * np.pi / 180.
 
             if mapping[n] >= 0:
                 mesh_check += 1
                 mesh_coord_nod2D = mesh_coord_nod2D.at[0, mapping[n]].set(x)
                 mesh_coord_nod2D = mesh_coord_nod2D.at[1, mapping[n]].set(y)
 
-#mesh_check_total = comm.allreduce(mesh_check, op=MPI.SUM)
-print(mesh_check-partit_myDim_nod2D - partit_eDim_nod2D)
+# mesh_check_total = comm.allreduce(mesh_check, op=MPI.SUM)
+print(mesh_check - partit_myDim_nod2D - partit_eDim_nod2D)
 ##############################################################################
 # Read 2D element data
 mesh_elem2D = jnp.zeros((3, partit_myDim_elem2D + partit_eDim_elem2D + partit_eXDim_elem2D), dtype=jnp.int32)
@@ -261,9 +227,9 @@ with open(file_name, 'r') as file:
     if rank == 0:
         for n in range(k):
             line = file.readline().strip().split()
-            ibuff[n, 0]=int(line[0])-1
-            ibuff[n, 1]=int(line[1])-1
-            ibuff[n, 2]=int(line[2])-1
+            ibuff[n, 0] = int(line[0]) - 1
+            ibuff[n, 1] = int(line[1]) - 1
+            ibuff[n, 2] = int(line[2]) - 1
 
     # Broadcast the buffers
     ibuff[:, 0] = comm.bcast(ibuff[:, 0], root=0)
@@ -293,9 +259,9 @@ with open(file_name, 'r') as file:
                 ipos = (nn) // chunk_size
                 if ipos == nchunk:
                     iofs = nn - nchunk * chunk_size - 1
-                    mesh_elem2D = mesh_elem2D.at[m, n].set(-mapping[iofs]-1)
+                    mesh_elem2D = mesh_elem2D.at[m, n].set(-mapping[iofs] - 1)
 
-    mesh_elem2D = -mesh_elem2D-1
+    mesh_elem2D = -mesh_elem2D - 1
 
 print(mesh_elem2D.min(), mesh_elem2D.max())
 if rank == 0:
@@ -362,7 +328,7 @@ with open(file_name, 'r') as file:
 
         # Broadcast the buffer to all processes
     rbuff = comm.bcast(rbuff, root=0)
-    count=0
+    count = 0
     # Process the depths
     for n in range(k):
         x = rbuff[n, 0]
@@ -373,13 +339,13 @@ with open(file_name, 'r') as file:
         if mapping[n] > 0:
             mesh_check += 1
             mesh_depth = mesh_depth.at[mapping[n] - 1].set(x)  # Adjust back to 0-based indexing
-            count=count+1
+            count = count + 1
 
 # ==============================
 # Communication information
 # Every process reads its file
 # ==============================
-MAX_NEIGHBOR_PARTITIONS=10
+MAX_NEIGHBOR_PARTITIONS = 10
 
 
 class CommunicationData:
@@ -397,7 +363,7 @@ class CommunicationData:
 com_nod2D = CommunicationData()
 com_elem2D = CommunicationData()
 com_elem2D_full = CommunicationData()
-max_neighbor_partitions=10
+max_neighbor_partitions = 10
 # Set file paths
 file_name = f"{dist_mesh_dir.strip()}/com_info{str(rank).zfill(5)}.out"
 with open(file_name, 'r') as file:
@@ -529,7 +495,7 @@ with open(file_name, 'r') as file:
 
 if rank == 0:
     print("Communication arrays are read")
-    
+
 del rbuff
 del ibuff
 del mapping
