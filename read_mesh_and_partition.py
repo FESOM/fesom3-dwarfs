@@ -110,74 +110,49 @@ def read_mesh_and_partition(mesh, partit, meshpath):
     ##############################################################################
     # Read 2D node data
     mesh.nod2D = partit.part[partit.npes] - 1
+    mapping = jnp.full(mesh.nod2D, -1, dtype=jnp.int32)
     # Allocate mesh.coord_nod2D with JAX
     mesh.coord_nod2D = jnp.zeros((2, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
     error_status = 0
-    # like in Fortran we read the mesh in chunks to avoid loading large arrays into memory
-    chunk_size = 1000000
-    mapping = jnp.zeros(chunk_size, dtype=jnp.int32)
-    ibuff = np.zeros((chunk_size, 4), dtype=np.int32)
-    rbuff = np.zeros((chunk_size, 3), dtype=np.float64)
     mesh.check = 0
     file_name = meshpath.strip() + '/nod2d.out'
     with open(file_name, 'r') as file:
-        if (partit.mype == 0):
-            n = int(file.readline().strip())  # Read nod2D
-            if n != mesh.nod2D:
-                error_status = 1  # Set the error status for consistency between part and nod2D
+        n = int(file.readline().strip())  # read nod2d
+        if n != mesh.nod2D:
+            error_status = 1  # set the error status for consistency between part and nod2d
             print('reading', file_name)
-
-        # Broadcast error status to all processes
-        error_status = MPI.COMM_WORLD.bcast(error_status, root=0)
-
         if error_status != 0:
             print(n)
             print('error: mesh.nod2D != part[npes]', mesh.nod2D, n)
             MPI.COMM_WORLD.Abort(1)  # Stop execution if there's an error
-        for nchunk in range((mesh.nod2D - 1) // chunk_size + 1):
-            # Create the mapping for the current chunk
-            mapping = mapping.at[:chunk_size].set(-1)
-            for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
-                ipos = (partit.myList_nod2D[n] - 1) // chunk_size
-                if ipos == nchunk:
-                    iofs = partit.myList_nod2D[n] - nchunk * chunk_size - 1
-                    mapping = mapping.at[iofs].set(n)
 
-            # Read the chunk into the buffers
-            k = min(chunk_size, mesh.nod2D - nchunk * chunk_size)
-            if partit.mype == 0:
-                for n in range(k):
-                    line = file.readline().strip().split()
-                    ibuff[n, 0], rbuff[n, 0], rbuff[n, 1], ibuff[n, 1] = int(line[0]), float(line[1]), float(
-                        line[2]), int(
-                        line[3])
+        # Create the mapping for local indexing
+        for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
+            ipos = partit.myList_nod2D[n]-1
+            mapping = mapping.at[ipos].set(n)
 
-                    # Apply the offset for longitude shift
-                    offset = 0.0
-                    if rbuff[n, 0] > 180.0:
-                        offset = -360.0
-                    elif rbuff[n, 0] < -180.0:
-                        offset = 360.0
+        for n in range(mesh.nod2D):
+            line = file.readline().strip().split()
+            i0, r0, r1, i1 = int(line[0]), float(line[1]), float(line[2]), int(line[3])
+            # Apply the offset for longitude shift
+            offset = 0.0
+            if   r0 > 180.0:
+                offset = -360.0
+            elif r0 < -180.0:
+                offset = 360.0
+            x = r0 * np.pi / 180.
+            y = r1 * np.pi / 180.
 
-            # Broadcast the buffers
-            rbuff[:, 0] = partit.MPI_COMM_FESOM.bcast(rbuff[:, 0], root=0)
-            rbuff[:, 1] = partit.MPI_COMM_FESOM.bcast(rbuff[:, 1], root=0)
-            ibuff[:, 1] = partit.MPI_COMM_FESOM.bcast(ibuff[:, 1], root=0)
-
-            # Fill the local arrays
-            for n in range(k):
-                x = rbuff[n, 0] * np.pi / 180.
-                y = rbuff[n, 1] * np.pi / 180.
-
-                if mapping[n] >= 0:
-                    mesh.check += 1
-                    mesh.coord_nod2D = mesh.coord_nod2D.at[0, mapping[n]].set(x)
-                    mesh.coord_nod2D = mesh.coord_nod2D.at[1, mapping[n]].set(y)
+            if mapping[n] >= 0:
+                mesh.check += 1
+                mesh.coord_nod2D = mesh.coord_nod2D.at[0, mapping[n]].set(x)
+                mesh.coord_nod2D = mesh.coord_nod2D.at[1, mapping[n]].set(y)
 
     # mesh.check_total = partit.MPI_COMM_FESOM.allreduce(mesh.check, op=MPI.SUM)
-    print(mesh.check - partit.myDim_nod2D - partit.eDim_nod2D)
+    print("nod2D reading check:", partit.mype, mesh.check - partit.myDim_nod2D - partit.eDim_nod2D)
     ##############################################################################
-
+    del mapping
+    
     # Read 2D element data
 #   mesh.elem2D = jnp.zeros((3, partit.myDim_elem2D + partit.eDim_elem2D + partit.eXDim_elem2D), dtype=jnp.int32)
     mesh.elem2D = jnp.full((3, partit.myDim_elem2D), -1, dtype=jnp.int32)
@@ -185,6 +160,7 @@ def read_mesh_and_partition(mesh, partit, meshpath):
     with open(file_name, 'r') as file:
         mesh.elem2D_total = jnp.int32(0)
         mesh.elem2D_total = jnp.int32(file.readline().strip())  # Read the total number of elem2D
+        mapping = jnp.zeros(mesh.elem2D_total, dtype=jnp.int32)
         print('reading', file_name)
         # Loop over chunks and process the data
         mapping = mapping.at[:mesh.elem2D_total].set(-1)
@@ -215,18 +191,16 @@ def read_mesh_and_partition(mesh, partit, meshpath):
 
 #    for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
 #        print(mesh.elem2D[:, n])
+    del mapping
     if partit.mype == 0:
         print("elements are read")
 
     # Read 3D auxiliary data
+    mapping = jnp.full(mesh.nod2D, -1, dtype=jnp.int32)
     file_name = meshpath.strip() + '/aux3d.out'
     mesh.nl = jnp.zeros(1, dtype=jnp.int32)
     with open(file_name, 'r') as file:
-        if partit.mype == 0:
-            mesh.nl = int(file.readline().strip())  # Read the number of levels
-        # Broadcast the number of levels to all processes
-        mesh.nl = partit.MPI_COMM_FESOM.bcast(mesh.nl, root=0)
-
+        mesh.nl = int(file.readline().strip())  # Read the number of levels
         # Check if the number of levels is less than 3
         if mesh.nl < 3:
             if partit.mype == 0:
@@ -236,13 +210,9 @@ def read_mesh_and_partition(mesh, partit, meshpath):
         # Allocate the array for storing the standard depths
         mesh.zbar = jnp.zeros(mesh.nl, dtype=jnp.float32)
 
-        # Read the standard depths on the root process
-        if partit.mype == 0:
-            file.readline()  # Skip the first line (already read)
-            mesh.zbar = jnp.array([float(val) for val in file.readline().strip().split()])
-
-        # Broadcast the zbar array to all processes
-        mesh.zbar = partit.MPI_COMM_FESOM.bcast(mesh.zbar, root=0)
+        # Read the standard depths
+        file.readline()  # Skip the first line (already read)
+        mesh.zbar = jnp.array([float(val) for val in file.readline().strip().split()])
 
         # Ensure zbar is negative
         if mesh.zbar[1] > 0:
@@ -254,44 +224,26 @@ def read_mesh_and_partition(mesh, partit, meshpath):
         # Allocate the array for depth information
         mesh.depth = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.float32)
 
-        # Initialize mesh.check
         mesh.check = 0
-
-        # Process the data in chunks
-        for nchunk in range((mesh.nod2D - 1) // chunk_size + 1):
-            mapping = jnp.zeros(chunk_size, dtype=jnp.int32)
-
         # Create the mapping for the current chunk
         for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
-            ipos = (partit.myList_nod2D[n] - 1) // chunk_size
-            if ipos == nchunk:
-                iofs = partit.myList_nod2D[n] - nchunk * chunk_size - 1
-                mapping = mapping.at[iofs].set(n + 1)  # Using 1-based indexing similar to Fortran
+            ipos = (partit.myList_nod2D[n] - 1)
+            mapping = mapping.at[ipos].set(n)  # Using 1-based indexing similar to Fortran
 
-        # Determine the number of elements to read in this chunk
-        k = min(chunk_size, mesh.nod2D - nchunk * chunk_size)
-
-        # Read the depth values into the buffer on the root process
-        if partit.mype == 0:
-            rbuff = np.zeros((k, 1), dtype=np.float32)
-            for n in range(k):
-                rbuff[n, 0] = float(file.readline().strip())
-
-            # Broadcast the buffer to all processes
-        rbuff = partit.MPI_COMM_FESOM.bcast(rbuff, root=0)
+        # Read the depth values into the buffer
         count = 0
-        # Process the depths
-        for n in range(k):
-            x = rbuff[n, 0]
-            if x > 0:
-                x = -x  # Depths must be negative
-            if x > -20.:  # Adjust based on threshold
-                x = -20.
-            if mapping[n] > 0:
+        for n in range(mesh.nod2D):
+            z = float(file.readline().strip())
+            # Process the depths
+            if z > 0:
+               z = -z     # Depths must be negative
+            if z > -20.:  # Adjust based on threshold
+               z = -20.
+            if mapping[n] >= 0:
                 mesh.check += 1
-                mesh.depth = mesh.depth.at[mapping[n] - 1].set(x)  # Adjust back to 0-based indexing
-                count = count + 1
-
+                mesh.depth = mesh.depth.at[mapping[n]].set(z)
+    del mapping
+    print("depth reading check:", partit.mype, mesh.check - partit.myDim_nod2D - partit.eDim_nod2D)
     # ==============================
     # Communication information
     # Every process reads its file
@@ -433,10 +385,6 @@ def read_mesh_and_partition(mesh, partit, meshpath):
 
     if partit.mype == 0:
         print("Communication arrays are read")
-
-    del rbuff
-    del ibuff
-    del mapping
     print(partit.mype, partit.eDim_nod2D, partit.com_nod2D.rlist)
 
     if partit.mype == 0:
@@ -542,92 +490,60 @@ def load_edges(mesh, partit,meshpath):
 
     mesh.edge2D=comm.bcast(mesh.edge2D, root=0)
     mesh.edge2D_in=comm.bcast(mesh.edge2D_in, root=0)
+    mapping = jnp.full(mesh.edge2D, -1, dtype=jnp.int32)
 
     mesh.edges = jnp.zeros((2, partit.myDim_edge2D + partit.eDim_edge2D), dtype=jnp.int32)
     mesh.edge_tri = jnp.zeros((2, partit.myDim_edge2D + partit.eDim_edge2D), dtype=jnp.int32)
     # Step 2: Read edges and edge_tri from files in chunks and distribute them
-    ibuff = jnp.zeros((4, chunk_size), dtype=jnp.int32)
     print(mype, mesh.edge2D, mesh.edge2D_in)
-    if mype == 0:
-        print(f"reading {meshpath}/edges.out")
-        edges_file = open(f"{meshpath}/edges.out", 'r')
-        edge_tri_file = open(f"{meshpath}/edge_tri.out", 'r')
-    mapping = jnp.zeros(chunk_size, dtype=jnp.int32)
-    for nchunk in range((mesh.edge2D - 1) // chunk_size + 1):
-        mapping = mapping.at[:chunk_size].set(-1)
-        for n in range(partit.myDim_edge2D + partit.eDim_edge2D):
-            ipos = (partit.myList_edge2D[n] - 1) // chunk_size
-            if ipos == nchunk:
-                iofs = partit.myList_edge2D[n] - nchunk * chunk_size -1 
-                mapping = mapping.at[iofs].set(n)
-        k = min(chunk_size, mesh.edge2D - nchunk * chunk_size)
-        if mype == 0:
-            for n in range(k):
-                ibuff = ibuff.at[:, n].set(jnp.array([int(x) for x in edges_file.readline().split()] +
-                                                     [int(x) for x in edge_tri_file.readline().split()]))
-        ibuff=comm.bcast(ibuff[:, :k], root=0)
-        for n in range(k):
-            if mapping[n] >= 0:
-                mesh_check += 1
-                mesh.edges = mesh.edges.at[:, mapping[n]].set(ibuff[0:2, n])
-                mesh.edge_tri = mesh.edge_tri.at[:, mapping[n]].set(ibuff[2:4, n])
+    mesh_check=0
+    print(f"reading {meshpath}/edges.out")
+    edges_file = open(f"{meshpath}/edges.out", 'r')
+    edge_tri_file = open(f"{meshpath}/edge_tri.out", 'r')
+    for n in range(partit.myDim_edge2D + partit.eDim_edge2D):
+        ipos = partit.myList_edge2D[n] - 1
+        mapping = mapping.at[ipos].set(n)
+    for n in range(mesh.edge2D):
+        ibuff = jnp.array([int(x) for x in edges_file.readline().split()] +
+                                                     [int(x) for x in edge_tri_file.readline().split()])
+        if mapping[n] >= 0:
+            mesh_check += 1
+            mesh.edges = mesh.edges.at[:, mapping[n]].set(ibuff[0:2]-1)
+            mesh.edge_tri = mesh.edge_tri.at[:, mapping[n]].set(ibuff[2:4]-1)
     if mesh_check != partit.myDim_edge2D + partit.eDim_edge2D:
         print(f"ERROR while reading edges.out/edge_tri.out on mype = {mype}")
         print(
             f"{mesh_check} values have been read, but it does not equal myDim_edge2D + eDim_edge2D = {partit.myDim_edge2D + partit.eDim_edge2D}")
 
-    if mype == 0:
-        edges_file.close()
-        edge_tri_file.close()
-
+    edges_file.close()
+    edge_tri_file.close()
+    del mapping
     # Step 3: Transform edge nodes to local indexing
-    mesh_check = 0
-    for nchunk in range((mesh.nod2D - 1) // chunk_size + 1):
-        mapping = mapping.at[:chunk_size].set(0)
+    mapping = jnp.zeros(mesh.nod2D, dtype=jnp.int32)
+    for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
+        ipos = partit.myList_nod2D[n] - 1
+        mapping = mapping.at[ipos].set(n)
 
-        for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
-            ipos = (partit.myList_nod2D[n] - 1) // chunk_size
-            if ipos == nchunk:
-                iofs = partit.myList_nod2D[n] - nchunk * chunk_size - 1
-                mapping = mapping.at[iofs].set(n)
-
-        for n in range(partit.myDim_edge2D + partit.eDim_edge2D):
-            for m in range(2):
-                nn = mesh.edges[m, n]
-                ipos = (nn - 1) // chunk_size
-                if ipos == nchunk:
-                    mesh_check += 1
-                    iofs = nn - nchunk * chunk_size -1 
-                    mesh.edges = mesh.edges.at[m, n].set(-mapping[iofs]-1)
-
-    mesh.edges = -mesh.edges-1
-    mesh_check //= 2
-    if mesh_check != partit.myDim_edge2D + partit.eDim_edge2D:
-        print(f"ERROR while transforming edge nodes to local indexing on mype = {mype}")
-        print(
-            f"{mesh_check} edges have been transformed, but it does not equal myDim_edge2D + eDim_edge2D = {partit.myDim_edge2D + partit.eDim_edge2D}")
-
+    for n in range(partit.myDim_edge2D + partit.eDim_edge2D):
+        for m in range(2):
+            nn = mesh.edges[m, n]
+            mesh.edges = mesh.edges.at[m, n].set(mapping[nn])
+    del mapping
     # Step 4: Transform edge_tri to local indexing
+    mapping = jnp.zeros(mesh.elem2D_total, dtype=jnp.int32)
     mesh_check = 0
-    for nchunk in range(0, (mesh.elem2D.shape[0] + chunk_size - 1) // chunk_size):
-        mapping = mapping.at[:chunk_size].set(0)
+    for n in range(partit.myDim_elem2D + partit.eDim_elem2D + partit.eXDim_elem2D):
+        ipos = partit.myList_elem2D[n] - 1
+        mapping = mapping.at[ipos].set(n)
 
-        for n in range(partit.myDim_elem2D + partit.eDim_elem2D + partit.eXDim_elem2D):
-            ipos = (partit.myList_elem2D[n] - 1) // chunk_size
-            if ipos == nchunk:
-                iofs = partit.myList_elem2D[n] - nchunk * chunk_size - 1
-                mapping = mapping.at[iofs].set(n)
-        mesh.edge_tri = jnp.where(mesh.edge_tri < 0, 0, mesh.edge_tri)
-        for n in range(partit.myDim_edge2D + partit.eDim_edge2D):
-            for m in range(2):
-                nn = mesh.edge_tri[m, n]
-                ipos = (nn - 1) // chunk_size
-                if ipos == nchunk and nn > 0:
-                    mesh_check += abs(m - 1)
-                    iofs = nn - nchunk * chunk_size - 1
-                    mesh.edge_tri = mesh.edge_tri.at[m, n].set(-mapping[iofs]-1)
+    mesh.edge_tri = jnp.where(mesh.edge_tri < 0, 0, mesh.edge_tri)
+    for n in range(partit.myDim_edge2D + partit.eDim_edge2D):
+        for m in range(2):
+            nn = mesh.edge_tri[m, n]
+            if nn >= 0:
+                mesh_check += abs(m - 1)
+                mesh.edge_tri = mesh.edge_tri.at[m, n].set(mapping[nn])
 
-    mesh.edge_tri = -mesh.edge_tri-1
     if mesh_check != partit.myDim_edge2D + partit.eDim_edge2D:
         print(f"ERROR while transforming edge elements to local indexing on mype = {mype}")
         print(
