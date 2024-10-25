@@ -4,7 +4,7 @@ from mpi4py import MPI
 from mpi4jax import send, recv, bcast
 from module_rotate_grid import *
 
-def read_mesh_and_partition(mesh, partit, meshpath):
+def read_mesh_and_partition(mesh, partit, meshpath, force_rotation):
     dist_mesh_dir = meshpath + 'dist_' + str(partit.npes) + '/'
     file_name = dist_mesh_dir.strip() + '/rpart.out'
 
@@ -143,6 +143,9 @@ def read_mesh_and_partition(mesh, partit, meshpath):
             x = r0 * np.pi / 180.
             y = r1 * np.pi / 180.
 
+            if (force_rotation):
+               x,y=g2r(x, y)
+
             if mapping[n] >= 0:
                 mesh.check += 1
                 mesh.coord_nod2D = mesh.coord_nod2D.at[0, mapping[n]].set(x)
@@ -209,10 +212,10 @@ def read_mesh_and_partition(mesh, partit, meshpath):
 
         # Allocate the array for storing the standard depths
         mesh.zbar = jnp.zeros(mesh.nl, dtype=jnp.float32)
-
+    with open(file_name, 'r') as file:
         # Read the standard depths
         file.readline()  # Skip the first line (already read)
-        mesh.zbar = jnp.array([float(val) for val in file.readline().strip().split()])
+        mesh.zbar = jnp.array([float(val) for _ in range(mesh.nl) for val in file.readline().strip().split()])
 
         # Ensure zbar is negative
         if mesh.zbar[1] > 0:
@@ -242,6 +245,7 @@ def read_mesh_and_partition(mesh, partit, meshpath):
             if mapping[n] >= 0:
                 mesh.check += 1
                 mesh.depth = mesh.depth.at[mapping[n]].set(z)
+    print("min/max depth=", partit.mype, mesh.zbar.min(), mesh.zbar.max(), mesh.depth.min(), mesh.depth.max())
     del mapping
     print("depth reading check:", partit.mype, mesh.check - partit.myDim_nod2D - partit.eDim_nod2D)
     # ==============================
@@ -474,7 +478,7 @@ import jax.numpy as jnp
 from mpi4py import MPI
 
 
-def load_edges(mesh, partit,meshpath):
+def load_edges(mesh, partit, meshpath):
     comm = partit.MPI_COMM_FESOM
     mype = partit.mype
     chunk_size = 100000
@@ -636,9 +640,9 @@ def exchange_nod2D(nod_array2D, partit):
 
     # Prepare the send buffer
     for n in range(sn):
-        nini = com_nod2D.sptr[n]
-        nend = com_nod2D.sptr[n + 1] - 1
-        s_buff_nod2D[n] = nod_array2D_np[com_nod2D.slist[nini:nend + 1]-1]
+        nini = com_nod2D.sptr[n] - 1
+        nend = com_nod2D.sptr[n + 1] - 2
+        s_buff_nod2D[n] = nod_array2D_np[com_nod2D.slist[nini:nend+1]-1]
 
     # Non-blocking MPI send
     for n in range(sn):
@@ -665,12 +669,9 @@ def exchange_nod2D(nod_array2D, partit):
 
     # Place received data into the appropriate positions in the original array
     for n in range(rn):
-        nini = com_nod2D.rptr[n]
-        nend = com_nod2D.rptr[n + 1] - 1
-#       print("size check:", mype, n, nini, nend, len(com_nod2D.rlist[nini:nend + 1]), len(r_buff_nod2D[n]))
-
-        nod_array2D_np[com_nod2D.rlist[nini:nend + 1]-1] = r_buff_nod2D[n]
-
+        nini = com_nod2D.rptr[n] - 1
+        nend = com_nod2D.rptr[n + 1] - 2
+        nod_array2D_np[com_nod2D.rlist[nini:nend+1]-1] = r_buff_nod2D[n]
     # Optionally convert back to JAX array if necessary
     nod_array2D = jnp.array(nod_array2D_np)
 
@@ -741,6 +742,138 @@ def exchange_nod2D_i(nod_array2D, partit):
     return nod_array2D
 
 
+def exchange_elem2D(elem_array2D, partit):
+    comm = partit.MPI_COMM_FESOM
+    mype = partit.mype
+    npes = partit.npes
+    com_elem2D = partit.com_elem2D
+
+    # Get the number of send/receive processes
+    sn = com_elem2D.sPEnum
+    rn = com_elem2D.rPEnum
+
+    # Convert elem_array2D to NumPy array if necessary (to ensure it's writable)
+    elem_array2D_np = np.array(elem_array2D, dtype=np.float64, copy=True)
+
+    # Buffers for send and receive operations
+    s_buff_elem2D = [None] * sn
+    r_buff_elem2D = [None] * rn
+
+    # Store send/receive requests
+    sreq = []
+    rreq = []
+
+    # Prepare the send buffer
+    for n in range(sn):
+        nini = com_elem2D.sptr[n]-1
+        nend = com_elem2D.sptr[n + 1] - 2
+        s_buff_elem2D[n] = elem_array2D_np[com_elem2D.slist[nini:nend + 1]-1]
+
+    # Non-blocking MPI send
+    for n in range(sn):
+        dest = com_elem2D.sPE[n]
+        nini = com_elem2D.sptr[n]
+        offset = com_elem2D.sptr[n + 1] - nini
+        req = comm.Isend(s_buff_elem2D[n], dest=dest, tag=mype)
+        sreq.append(req)
+
+    # Non-blocking MPI receive
+    for n in range(rn):
+        source = com_elem2D.rPE[n]
+        nini = com_elem2D.rptr[n]
+        offset = com_elem2D.rptr[n + 1] - nini
+        r_buff_elem2D[n] = np.zeros(offset, dtype=np.float64)
+        req = comm.Irecv(r_buff_elem2D[n], source=source, tag=source)
+        rreq.append(req)
+
+    # Wait for all send operations to complete
+    MPI.Request.Waitall(sreq)
+
+    # Wait for all receive operations to complete
+    MPI.Request.Waitall(rreq)
+
+    # Place received data into the appropriate positions in the original array
+    for n in range(rn):
+        nini = com_elem2D.rptr[n]-1
+        nend = com_elem2D.rptr[n + 1] - 2
+        elem_array2D_np[com_elem2D.rlist[nini:nend + 1]-1] = r_buff_elem2D[n]
+
+    # Optionally convert back to JAX array if necessary
+    elem_array2D = jnp.array(elem_array2D_np)
+
+    return elem_array2D
+
+def exchange_nod3D(nod_array3D, partit):
+    comm = partit.MPI_COMM_FESOM
+    mype = partit.mype
+    npes = partit.npes
+    com_nod2D = partit.com_nod2D
+
+    # Get the number of send/receive processes
+    sn = com_nod2D.sPEnum
+    rn = com_nod2D.rPEnum
+
+    # Convert nod_array3D to NumPy array if necessary (to ensure it's writable)
+    nod_array3D_np = np.array(nod_array3D, dtype=np.float64, copy=True)
+    nl1 = nod_array3D_np.shape[0]  # Size in the vertical dimension
+
+    # Buffers for send and receive operations
+    s_buff_nod3D = [None] * sn
+    r_buff_nod3D = [None] * rn
+
+    # Store send/receive requests
+    sreq = []
+    rreq = []
+
+    # Prepare the send buffer
+    for n in range(sn):
+        nini = com_nod2D.sptr[n] - 1
+        nend = com_nod2D.sptr[n + 1] - 2
+        nc = 0
+        s_buff_nod3D[n] = np.zeros((nl1 * (nend - nini + 1)), dtype=np.float64)
+        for nh in range(nini, nend + 1):
+            for nz in range(nl1):
+                s_buff_nod3D[n][nc] = nod_array3D_np[nz, com_nod2D.slist[nh] - 1]
+                nc += 1
+
+    # Non-blocking MPI send
+    for n in range(sn):
+        dest = com_nod2D.sPE[n]
+        nini = com_nod2D.sptr[n]
+        offset = (com_nod2D.sptr[n + 1] - nini) * nl1
+        req = comm.Isend(s_buff_nod3D[n], dest=dest, tag=mype)
+        sreq.append(req)
+
+    # Non-blocking MPI receive
+    for n in range(rn):
+        source = com_nod2D.rPE[n]
+        nini = com_nod2D.rptr[n]
+        offset = (com_nod2D.rptr[n + 1] - nini) * nl1
+        r_buff_nod3D[n] = np.zeros(offset, dtype=np.float64)
+        req = comm.Irecv(r_buff_nod3D[n], source=source, tag=source)
+        rreq.append(req)
+
+    # Wait for all send operations to complete
+    MPI.Request.Waitall(sreq)
+
+    # Wait for all receive operations to complete
+    MPI.Request.Waitall(rreq)
+
+    # Place received data into the appropriate positions in the original array
+    for n in range(rn):
+        nini = com_nod2D.rptr[n] - 1
+        nend = com_nod2D.rptr[n + 1] - 2
+        nc = 0
+        for nh in range(nini, nend + 1):
+            for nz in range(nl1):
+                nod_array3D_np[nz, com_nod2D.rlist[nh] - 1] = r_buff_nod3D[n][nc]
+                nc += 1
+
+    # Optionally convert back to JAX array if necessary
+    nod_array3D = jnp.array(nod_array3D_np)
+
+    return nod_array3D
+
 def find_neighbors(mesh, partit):
     comm = partit.MPI_COMM_FESOM
     mype = partit.mype
@@ -784,7 +917,7 @@ def find_neighbors(mesh, partit):
 
     # Allocate nod_in_elem2D array and reset values
     max_rmax = jnp.max(rmax)
-    mesh.nod_in_elem2D = jnp.zeros((max_rmax, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.int32)
+    mesh.nod_in_elem2D = jnp.full((max_rmax, partit.myDim_nod2D + partit.eDim_nod2D), -1, dtype=jnp.int32)
     mesh.nod_in_elem2D_num = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.int32)
     # Fill nod_in_elem2D array with the elements containing the node
     count=0
@@ -794,7 +927,8 @@ def find_neighbors(mesh, partit):
             if node >= partit.myDim_nod2D:
                 continue
             mesh.nod_in_elem2D_num = mesh.nod_in_elem2D_num.at[node].add(1)
-            mesh.nod_in_elem2D = mesh.nod_in_elem2D.at[mesh.nod_in_elem2D_num[node] - 1, node].set(n)
+            mesh.nod_in_elem2D     = mesh.nod_in_elem2D.at[mesh.nod_in_elem2D_num[node]-1, node].set(n)
+
     print("jnp.min/max(mesh.nod_in_elem2D_num) before =", partit.mype, jnp.min(mesh.nod_in_elem2D_num), jnp.max(mesh.nod_in_elem2D_num), partit.myDim_elem2D)
     # Exchange nod_in_elem2D_num between processors
     mesh.nod_in_elem2D_num=exchange_nod2D_i(mesh.nod_in_elem2D_num, partit)
@@ -806,18 +940,24 @@ def find_neighbors(mesh, partit):
 #       print(mype, "find_neighbors n/max_rmax=",n,max_rmax)
         for j in range(partit.myDim_nod2D):
             if mesh.nod_in_elem2D[n, j] >= 0:
-                temp_i = temp_i.at[j].set(partit.myList_elem2D[mesh.nod_in_elem2D[n, j]])
+                temp_i = temp_i.at[j].set(partit.myList_elem2D[mesh.nod_in_elem2D[n, j]]-1)
         temp_i=exchange_nod2D_i(temp_i, partit)
         mesh.nod_in_elem2D = mesh.nod_in_elem2D.at[n, :].set(temp_i)
-
+    del temp_i
+    if (mype == 0):
+       print("super check 0:", mype, mesh.nod_in_elem2D[:, partit.myDim_nod2D-1])
     # Substitute back local element numbers
-    temp_i = jnp.zeros(mesh.elem2D.shape[1], dtype=jnp.int32)
+    temp_i = jnp.zeros(mesh.elem2D_total, dtype=jnp.int32)
     for n in range(partit.myDim_elem2D + partit.eDim_elem2D + partit.eXDim_elem2D):
-        temp_i = temp_i.at[partit.myList_elem2D[n]].set(n)
+        temp_i = temp_i.at[partit.myList_elem2D[n]-1].set(n)
 
     for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
         for j in range(mesh.nod_in_elem2D_num[n].item()):
             mesh.nod_in_elem2D = mesh.nod_in_elem2D.at[j, n].set(temp_i[mesh.nod_in_elem2D[j, n]])
+
+    del temp_i
+    if (mype == 0):
+       print("super check 1:", mype, mesh.nod_in_elem2D[:, partit.myDim_nod2D-1])
     # Validate that each element has at least two valid neighbors
     for elem in range(partit.myDim_elem2D):
         elem1 = 0
@@ -829,4 +969,190 @@ def find_neighbors(mesh, partit):
             print(f"Insufficient number of neighbors for element {partit.myList_elem2D[elem]}")
             comm.Abort(1)
     print(mype, "find_neighbors part finished")
+    return mesh, partit
+
+def find_levels(mesh, partit, meshpath):
+    comm = partit.MPI_COMM_FESOM
+    mype = partit.mype
+    npes = partit.npes
+    # Synchronize processes
+    comm.Barrier()
+    # Allocate nlevels and nlevels_nod2D
+    mesh.nlevels = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D + partit.eXDim_elem2D, dtype=jnp.int32)
+    mesh.nlevels_nod2D = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.int32)
+    mapping = jnp.full(mesh.elem2D_total, -1, dtype=jnp.int32)
+
+    for n in range(partit.myDim_elem2D + partit.eDim_elem2D + partit.eXDim_elem2D):
+        ipos = partit.myList_elem2D[n] - 1
+        mapping = mapping.at[ipos].set(n)
+
+    elvls_file = open(f"{meshpath}/elvls.out", 'r')
+    # Part I: Reading levels at elements
+    for n in range(mesh.elem2D_total):
+        elvls = int(elvls_file.readline().strip())-1
+        if mapping[n] >= 0:
+           mesh.nlevels = mesh.nlevels.at[mapping[n]].set(elvls)
+    elvls_file.close()
+    del mapping
+    # Part II: Reading levels at nodes
+    mapping = jnp.full(mesh.nod2D, -1, dtype=jnp.int32)
+    for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
+        ipos = partit.myList_nod2D[n] - 1
+        mapping = mapping.at[ipos].set(n)
+
+    nlvls_file = open(f"{meshpath}/nlvls.out", 'r')
+    for n in range(mesh.nod2D):
+        nlvls = int(nlvls_file.readline().strip())-1
+        if mapping[n] >= 0:
+           mesh.nlevels_nod2D = mesh.nlevels_nod2D.at[mapping[n]].set(nlvls)
+
+    # Allocate ulevels and ulevels_nod2D
+    mesh.ulevels = jnp.ones(partit.myDim_elem2D + partit.eDim_elem2D + partit.eXDim_elem2D, dtype=jnp.int32)
+    mesh.ulevels_nod2D = jnp.ones(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.int32)
+
+    # Print summary on mype = 0
+    min_level = jnp.min(mesh.nlevels)
+    max_level = jnp.max(mesh.nlevels)
+    print(f"Min/max depth on mype {mype}: {mesh.zbar[min_level]}, {mesh.zbar[max_level]}")
+#   print("mesh.zbar on mype", mype, mesh.zbar.min(), mesh.zbar.max())
+    return mesh, partit
+
+def find_levels_min_e2n(mesh, partit):
+    comm = partit.MPI_COMM_FESOM
+    mype = partit.mype
+    npes = partit.npes
+    # Synchronize processes
+    comm.Barrier()
+
+    mesh.nlevels_nod2D_min = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.int32)
+    mesh.ulevels_nod2D_max = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.int32)
+
+    # Loop through all nodes and compute min/max levels for each node's neighboring elements
+    for node in range(partit.myDim_nod2D):
+        k = mesh.nod_in_elem2D_num[node]
+        # Get the minimum depth in neighboring elements around node
+        mesh.nlevels_nod2D_min = mesh.nlevels_nod2D_min.at[node].set(
+            jnp.min(mesh.nlevels[mesh.nod_in_elem2D[:k, node]])
+        )
+        # Get the maximum u-levels in neighboring elements around node
+        mesh.ulevels_nod2D_max = mesh.ulevels_nod2D_max.at[node].set(
+            jnp.max(mesh.ulevels[mesh.nod_in_elem2D[:k, node]])
+        )
+
+    mesh.nlevels_nod2D_min = exchange_nod2D_i(mesh.nlevels_nod2D_min, partit)
+    mesh.ulevels_nod2D_max = exchange_nod2D_i(mesh.ulevels_nod2D_max, partit)
+    
+    return mesh, partit
+
+
+def mesh_areas(mesh, partit, cartesian, cyclic_length, r_earth):
+    comm = partit.MPI_COMM_FESOM
+    mype = partit.mype
+    npes = partit.npes
+    # Synchronize processes
+    comm.Barrier()
+
+    mesh.elem_area = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D, dtype=jnp.float32)
+    mesh.area = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
+    mesh.areasvol = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
+    mesh.area_inv = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
+    mesh.areasvol_inv = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
+    mesh.mesh_resolution = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.float32)
+    # Compute triangle areas
+    for n in range(partit.myDim_elem2D):
+        elnodes = mesh.elem2D[:, n]
+        ay = jnp.sum(mesh.coord_nod2D[1, elnodes]) / 3.0
+        ay = jnp.cos(ay) if not cartesian else 1.0
+        a = mesh.coord_nod2D[:, elnodes[1]] - mesh.coord_nod2D[:, elnodes[0]]
+        b = mesh.coord_nod2D[:, elnodes[2]] - mesh.coord_nod2D[:, elnodes[0]]
+        a = trim_cyclic(a, cyclic_length)
+        b = trim_cyclic(b, cyclic_length)
+        a = a.at[0].set(a[0] * ay)
+        b = b.at[0].set(b[0] * ay)
+        mesh.elem_area = mesh.elem_area.at[n].set(0.5 * abs(a[0] * b[1] - b[0] * a[1]))
+    # Exchange element areas
+    mesh.elem_area = exchange_elem2D(mesh.elem_area, partit)
+
+    elnodes = mesh.elem2D[:, 0]
+    print("x coord check:", mype, mesh.coord_nod2D[0, elnodes])
+    print("y coord check:", mype, mesh.coord_nod2D[1, elnodes])
+
+    # Compute areas of upper/lower scalar cell edges
+    for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
+        for j in range(mesh.nod_in_elem2D_num[n]):
+            elem = mesh.nod_in_elem2D[j, n]
+            nzmin = mesh.ulevels[elem]
+            nzmax = mesh.nlevels[elem] - 1
+            for nz in range(nzmin, nzmax + 1):
+                mesh.area = mesh.area.at[nz, n].set(mesh.area[nz, n] + mesh.elem_area[elem] / 3.0)
+
+    mesh.areasvol = mesh.area
+    # Scale areas to meters squared
+    mesh.elem_area *= r_earth * r_earth
+    mesh.area *= r_earth * r_earth
+    mesh.areasvol *= r_earth * r_earth
+    # Exchange nodal areas
+#    mesh.area     = exchange_nod3D(mesh.area,     partit)
+#    mesh.areasvol = exchange_nod3D(mesh.areasvol, partit)
+    if (mype==0):
+        n=partit.myDim_nod2D-1
+        print("node area check 1:", n, mesh.nod_in_elem2D_num[n])
+        for j in range(mesh.nod_in_elem2D_num[n]):
+            elem = mesh.nod_in_elem2D[j, n]
+            print("node area check 2:", j, elem, mesh.elem_area[elem])
+
+        elem = mesh.nod_in_elem2D[j, n]
+#    print("elem area check:", mype, mesh.elem_area[0], mesh.elem_area[partit.myDim_elem2D-1], jnp.sum(mesh.elem_area[:partit.myDim_elem2D]))
+#    print("node area check:", mype, mesh.area[1,0], mesh.area[1,partit.myDim_nod2D-1], jnp.sum(mesh.area[1,:partit.myDim_nod2D]))
+
+    # Compute inverse area
+    for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
+        nzmin = mesh.ulevels_nod2D[n]
+        nzmax = mesh.nlevels_nod2D[n]
+        for nz in range(nzmin, nzmax + 1):
+            mesh.area_inv = mesh.area_inv.at[nz, n].set(1.0 / mesh.area[nz, n] if mesh.area[nz, n] > 0.0 else 0.0)
+
+
+    mesh.areasvol_inv = mesh.area_inv
+
+    # Compute scalar cell resolution
+    work_array = jnp.zeros(partit.myDim_nod2D, dtype=jnp.float32)
+    for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
+        mesh.mesh_resolution = mesh.mesh_resolution.at[n].set(jnp.sqrt(mesh.areasvol[mesh.ulevels_nod2D[n], n] / jnp.pi) * 2.0)
+
+    # Smooth the resolution field
+    for _ in range(3):  # Apply smoothing 3 times
+        for n in range(partit.myDim_nod2D):
+            vol = 0.0
+            work_array = work_array.at[n].set(0.0)
+            for j in range(mesh.nod_in_elem2D_num[n]):
+                elem = mesh.nod_in_elem2D[j, n]
+                elnodes = mesh.elem2D[:, elem]
+                work_array = work_array.at[n].set(work_array[n] + jnp.sum(mesh.mesh_resolution[elnodes]) / 3.0 * mesh.elem_area[elem])
+                vol += mesh.elem_area[elem]
+            work_array = work_array.at[n].set(work_array[n] / vol)
+        mesh_resolution = mesh.mesh_resolution.at[:partit.myDim_nod2D].set(work_array)
+        mesh.mesh_resolution = exchange_nod2D(mesh.mesh_resolution, partit)
+        comm.Barrier()
+    # Compute total ocean areas with/without cavity
+    vol = 0.0
+    vol2 = 0.0
+    print("1st level:", mesh.ulevels_nod2D.min(), mesh.ulevels_nod2D.max())
+    for n in range(partit.myDim_nod2D):
+        vol2 += mesh.areasvol[mesh.ulevels_nod2D[n], n]
+        if mesh.ulevels_nod2D[n] == 1:
+            vol += mesh.areasvol[1, n]
+
+    mesh.ocean_area = comm.allreduce(vol, op=MPI.SUM)
+    mesh.ocean_areawithcav = comm.allreduce(vol2, op=MPI.SUM)
+
+    # Print mesh statistics on mype 0
+    if mype == 0:
+        print('____________________________________________________________________')
+        print(f' --> mesh statistics (mype {mype}):')
+        print(f'  MaxElemArea: {jnp.max(mesh.elem_area)}, MinElemArea: {jnp.min(mesh.elem_area)}')
+        print(f'  MaxScalarArea: {jnp.max(mesh.area[0, :])}, MinScalarArea: {jnp.min(mesh.area[0, :])}')
+        print(f'  Edges: {mesh.edge2D}, internal: {mesh.edge2D_in}')
+        print(f'  Total ocean surface area: {mesh.ocean_area} m^2')
+        print(f'  Total ocean surface area with cavity: {mesh.ocean_areawithcav} m^2')
     return mesh, partit
