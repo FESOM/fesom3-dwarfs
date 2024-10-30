@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import numpy as np
 from mpi4py import MPI
@@ -14,7 +15,7 @@ def read_mesh_and_partition(mesh, partit, meshpath, force_rotation):
     if partit.mype == 0:
         with open(file_name, 'r') as file:
             # Read the number of processors
-            partit.npes = jnp.int32(int(file.readline().strip()))
+            partit.npes = int(int(file.readline().strip()))
             # Allocate partit%part array
             partit.part = jnp.zeros(partit.npes + 1, dtype=jnp.int32)
             partit.part = partit.part.at[0].set(1)
@@ -44,10 +45,10 @@ def read_mesh_and_partition(mesh, partit, meshpath, force_rotation):
         n = int(file.readline().strip())
 
         # Read partit%myDim_nod2D
-        partit.myDim_nod2D = jnp.int32(file.readline().strip())
+        partit.myDim_nod2D = int(file.readline().strip())
 
         # Read partit%eDim_nod2D
-        partit.eDim_nod2D = jnp.int32(file.readline().strip())
+        partit.eDim_nod2D = int(file.readline().strip())
 
         # Allocate partit%myList_nod2D
         partit.myList_nod2D = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.int32)
@@ -64,13 +65,13 @@ def read_mesh_and_partition(mesh, partit, meshpath, force_rotation):
                     break
 
         # Read partit%myDim_elem2D
-        partit.myDim_elem2D = jnp.int32(file.readline().strip())
+        partit.myDim_elem2D = int(file.readline().strip())
 
         # Read partit%eDim_elem2D
-        partit.eDim_elem2D = jnp.int32(file.readline().strip())
+        partit.eDim_elem2D = int(file.readline().strip())
 
         # Read partit%eXDim_elem2D
-        partit.eXDim_elem2D = jnp.int32(file.readline().strip())
+        partit.eXDim_elem2D = int(file.readline().strip())
 
         # Allocate partit%myList_elem2D
         partit.myList_elem2D = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D + partit.eXDim_elem2D,
@@ -88,10 +89,10 @@ def read_mesh_and_partition(mesh, partit, meshpath, force_rotation):
                 else:
                     break
         # Read partit%myDim_edge2D
-        partit.myDim_edge2D = jnp.int32(file.readline().strip())
+        partit.myDim_edge2D = int(file.readline().strip())
 
         # Read partit%eDim_edge2D
-        partit.eDim_edge2D = jnp.int32(file.readline().strip())
+        partit.eDim_edge2D = int(file.readline().strip())
 
         # Allocate partit%myList_edge2D
         partit.myList_edge2D = jnp.zeros(partit.myDim_edge2D + partit.eDim_edge2D, dtype=jnp.int32)
@@ -112,7 +113,7 @@ def read_mesh_and_partition(mesh, partit, meshpath, force_rotation):
     mesh.nod2D = partit.part[partit.npes] - 1
     mapping = jnp.full(mesh.nod2D, -1, dtype=jnp.int32)
     # Allocate mesh.coord_nod2D with JAX
-    mesh.coord_nod2D = jnp.zeros((2, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
+    mesh.coord_nod2D = jnp.zeros((2, partit.myDim_nod2D + partit.eDim_nod2D))
     error_status = 0
     mesh.check = 0
     file_name = meshpath.strip() + '/nod2d.out'
@@ -161,8 +162,8 @@ def read_mesh_and_partition(mesh, partit, meshpath, force_rotation):
     mesh.elem2D = jnp.full((3, partit.myDim_elem2D), -1, dtype=jnp.int32)
     file_name = meshpath.strip() + '/elem2d.out'
     with open(file_name, 'r') as file:
-        mesh.elem2D_total = jnp.int32(0)
-        mesh.elem2D_total = jnp.int32(file.readline().strip())  # Read the total number of elem2D
+        mesh.elem2D_total = int(0)
+        mesh.elem2D_total = int(file.readline().strip())  # Read the total number of elem2D
         mapping = jnp.zeros(mesh.elem2D_total, dtype=jnp.int32)
         print('reading', file_name)
         # Loop over chunks and process the data
@@ -211,7 +212,7 @@ def read_mesh_and_partition(mesh, partit, meshpath, force_rotation):
             MPI.COMM_WORLD.Abort(1)  # Stop execution
 
         # Allocate the array for storing the standard depths
-        mesh.zbar = jnp.zeros(mesh.nl, dtype=jnp.float32)
+        mesh.zbar = jnp.zeros(mesh.nl)
     with open(file_name, 'r') as file:
         # Read the standard depths
         file.readline()  # Skip the first line (already read)
@@ -225,7 +226,7 @@ def read_mesh_and_partition(mesh, partit, meshpath, force_rotation):
         mesh.Z = 0.5 * (mesh.zbar[:-1] + mesh.zbar[1:])
 
         # Allocate the array for depth information
-        mesh.depth = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.float32)
+        mesh.depth = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
 
         mesh.check = 0
         # Create the mapping for the current chunk
@@ -578,7 +579,7 @@ def load_edges(mesh, partit, meshpath):
     print(f"load_edges finished on mype = {mype}")
     return mesh, partit
 
-def edge_center(n1, n2, mesh):
+def edge_center(n1, n2, mesh, cyclic_length):
     """
     Calculate the center of an edge formed by nodes n1 and n2.
     Adjusts coordinates for cyclic length.
@@ -594,27 +595,26 @@ def edge_center(n1, n2, mesh):
     x = 0.5 * (a[0] + b[0])
     y = 0.5 * (a[1] + b[1])
 
-    return x, y
-
-def elem_center(elem, mesh):
+    return jnp.array([x, y])
+@jax.jit
+def elem_center(elem, elem2D, coord_nod2D, cyclic_length):
     """
     Calculate the center of an element.
     Adjust coordinates for cyclic length.
     """
-    elnodes = mesh.elem2D[:, elem]
-    ax = mesh.coord_nod2D[0, elnodes]
+    elnodes = elem2D[:, elem]
+    ax = coord_nod2D[0, elnodes]
     amin = jnp.min(ax)
 
-    for k in range(3):
-        if ax[k] - amin >= cyclic_length / 2.0:
-            ax = ax.at[k].set(ax[k] - cyclic_length)
-        elif ax[k] - amin < -cyclic_length / 2.0:
-            ax = ax.at[k].set(ax[k] + cyclic_length)
+    # Adjust `ax` coordinates using JAX's array operations
+    ax = jnp.where(ax - amin >= cyclic_length / 2.0, ax - cyclic_length, ax)
+    ax = jnp.where(ax - amin < -cyclic_length / 2.0, ax + cyclic_length, ax)
 
+    # Calculate the center coordinates
     x = jnp.sum(ax) / 3.0
-    y = jnp.sum(mesh.coord_nod2D[1, elnodes]) / 3.0
+    y = jnp.sum(coord_nod2D[1, elnodes]) / 3.0
 
-    return x, y
+    return jnp.array([x, y])
 
 
 def exchange_nod2D(nod_array2D, partit):
@@ -628,7 +628,7 @@ def exchange_nod2D(nod_array2D, partit):
     rn = com_nod2D.rPEnum
 
     # Convert nod_array2D to NumPy array if necessary (to ensure it's writable)
-    nod_array2D_np = np.array(nod_array2D, dtype=np.float64, copy=True)
+    nod_array2D_np = np.array(nod_array2D, copy=True)
 
     # Buffers for send and receive operations
     s_buff_nod2D = [None] * sn
@@ -657,7 +657,7 @@ def exchange_nod2D(nod_array2D, partit):
         source = com_nod2D.rPE[n]
         nini = com_nod2D.rptr[n]
         offset = com_nod2D.rptr[n + 1] - nini
-        r_buff_nod2D[n] = np.zeros(offset, dtype=np.float64)
+        r_buff_nod2D[n] = np.zeros(offset)
         req = comm.Irecv(r_buff_nod2D[n], source=source, tag=source)
         rreq.append(req)
 
@@ -753,7 +753,7 @@ def exchange_elem2D(elem_array2D, partit):
     rn = com_elem2D.rPEnum
 
     # Convert elem_array2D to NumPy array if necessary (to ensure it's writable)
-    elem_array2D_np = np.array(elem_array2D, dtype=np.float64, copy=True)
+    elem_array2D_np = np.array(elem_array2D, copy=True)
 
     # Buffers for send and receive operations
     s_buff_elem2D = [None] * sn
@@ -782,7 +782,7 @@ def exchange_elem2D(elem_array2D, partit):
         source = com_elem2D.rPE[n]
         nini = com_elem2D.rptr[n]
         offset = com_elem2D.rptr[n + 1] - nini
-        r_buff_elem2D[n] = np.zeros(offset, dtype=np.float64)
+        r_buff_elem2D[n] = np.zeros(offset)
         req = comm.Irecv(r_buff_elem2D[n], source=source, tag=source)
         rreq.append(req)
 
@@ -814,7 +814,7 @@ def exchange_nod3D(nod_array3D, partit):
     rn = com_nod2D.rPEnum
 
     # Convert nod_array3D to NumPy array if necessary (to ensure it's writable)
-    nod_array3D_np = np.array(nod_array3D, dtype=np.float64, copy=True)
+    nod_array3D_np = np.array(nod_array3D, copy=True)
     nl1 = nod_array3D_np.shape[0]  # Size in the vertical dimension
 
     # Buffers for send and receive operations
@@ -830,7 +830,7 @@ def exchange_nod3D(nod_array3D, partit):
         nini = com_nod2D.sptr[n] - 1
         nend = com_nod2D.sptr[n + 1] - 2
         nc = 0
-        s_buff_nod3D[n] = np.zeros((nl1 * (nend - nini + 1)), dtype=np.float64)
+        s_buff_nod3D[n] = np.zeros((nl1 * (nend - nini + 1)))
         for nh in range(nini, nend + 1):
             for nz in range(nl1):
                 s_buff_nod3D[n][nc] = nod_array3D_np[nz, com_nod2D.slist[nh] - 1]
@@ -849,7 +849,7 @@ def exchange_nod3D(nod_array3D, partit):
         source = com_nod2D.rPE[n]
         nini = com_nod2D.rptr[n]
         offset = (com_nod2D.rptr[n + 1] - nini) * nl1
-        r_buff_nod3D[n] = np.zeros(offset, dtype=np.float64)
+        r_buff_nod3D[n] = np.zeros(offset)
         req = comm.Irecv(r_buff_nod3D[n], source=source, tag=source)
         rreq.append(req)
 
@@ -1052,12 +1052,12 @@ def mesh_areas(mesh, partit, cartesian, cyclic_length, r_earth):
     # Synchronize processes
     comm.Barrier()
 
-    mesh.elem_area = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D, dtype=jnp.float32)
-    mesh.area = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
-    mesh.areasvol = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
-    mesh.area_inv = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
-    mesh.areasvol_inv = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
-    mesh.mesh_resolution = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.float32)
+    mesh.elem_area = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D)
+    mesh.area = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D))
+    mesh.areasvol = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D))
+    mesh.area_inv = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D))
+    mesh.areasvol_inv = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D))
+    mesh.mesh_resolution = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
     # Compute triangle areas
     for n in range(partit.myDim_elem2D):
         elnodes = mesh.elem2D[:, n]
@@ -1116,7 +1116,7 @@ def mesh_areas(mesh, partit, cartesian, cyclic_length, r_earth):
     mesh.areasvol_inv = mesh.area_inv
 
     # Compute scalar cell resolution
-    work_array = jnp.zeros(partit.myDim_nod2D, dtype=jnp.float32)
+    work_array = jnp.zeros(partit.myDim_nod2D)
     for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
         mesh.mesh_resolution = mesh.mesh_resolution.at[n].set(jnp.sqrt(mesh.areasvol[mesh.ulevels_nod2D[n], n] / jnp.pi) * 2.0)
 
@@ -1156,3 +1156,214 @@ def mesh_areas(mesh, partit, cartesian, cyclic_length, r_earth):
         print(f'  Total ocean surface area: {mesh.ocean_area} m^2')
         print(f'  Total ocean surface area with cavity: {mesh.ocean_areawithcav} m^2')
     return mesh, partit
+
+def mesh_auxiliary_arrays(mesh, partit, cartesian, fplane, cyclic_length, r_earth):
+    """
+    This function initializes auxiliary arrays for the mesh to accelerate gradient
+    and divergence calculations, as well as to facilitate the handling of cyclicity.
+    """
+    comm = partit.MPI_COMM_FESOM
+    mype = partit.mype
+    npes = partit.npes
+    # Synchronize processes
+    comm.Barrier()
+
+    myDim_edge2D = partit.myDim_edge2D
+    eDim_edge2D = partit.eDim_edge2D
+    myDim_elem2D = partit.myDim_elem2D
+    eDim_elem2D = partit.eDim_elem2D
+    eXDim_elem2D = partit.eXDim_elem2D
+    myDim_nod2D = partit.myDim_nod2D
+    eDim_nod2D = partit.eDim_nod2D
+    omega = 7.2921e-5  # Earth's rotation rate
+
+    # Allocate arrays with JAX
+    mesh.edge_dxdy = jnp.zeros((2, myDim_edge2D + eDim_edge2D))
+    mesh.edge_cross_dxdy = jnp.zeros((4, myDim_edge2D + eDim_edge2D))
+    mesh.gradient_sca = jnp.zeros((6, myDim_elem2D))
+    mesh.gradient_vec = jnp.zeros((6, myDim_elem2D))
+    mesh.metric_factor = jnp.zeros(myDim_elem2D + eDim_elem2D + eXDim_elem2D)
+    mesh.elem_cos = jnp.zeros(myDim_elem2D + eDim_elem2D + eXDim_elem2D)
+    mesh.coriolis = jnp.zeros(myDim_elem2D)
+    mesh.coriolis_node = jnp.zeros(myDim_nod2D + eDim_nod2D)
+    mesh.geo_coord_nod2D = jnp.zeros((2, myDim_nod2D + eDim_nod2D))
+    center_x = jnp.zeros(myDim_elem2D + eDim_elem2D + eXDim_elem2D)
+    center_y = jnp.zeros(myDim_elem2D + eDim_elem2D + eXDim_elem2D)
+
+    # Compute Coriolis force at each node
+    for n in range(myDim_nod2D + eDim_nod2D):
+        lon, lat = r2g(mesh.coord_nod2D[0, n], mesh.coord_nod2D[1, n])
+        mesh.coriolis_node = mesh.coriolis_node.at[n].set(2 * omega * jnp.sin(lat))
+        if lon > 2 * jnp.pi:
+            lon -= 2 * jnp.pi
+        elif lon < -2 * jnp.pi:
+            lon += 2 * jnp.pi
+        mesh.geo_coord_nod2D = mesh.geo_coord_nod2D.at[:, n].set(jnp.array([lon, lat]))
+
+    for n in range(myDim_elem2D):
+        jnpaux = elem_center(n, mesh.elem2D, mesh.coord_nod2D, cyclic_length)
+        ax=jnpaux[0]
+        ay=jnpaux[1]
+        lon, lat = r2g(ax, ay)
+        mesh.coriolis = mesh.coriolis.at[n].set(2 * omega * jnp.sin(lat))
+        center_x = center_x.at[n].set(ax)
+        center_y = center_y.at[n].set(ay)
+        mesh.elem_cos = mesh.elem_cos.at[n].set(jnp.cos(ay))
+        mesh.metric_factor = mesh.metric_factor.at[n].set(jnp.tan(ay) / r_earth)
+
+    if fplane:
+        mesh.coriolis = mesh.coriolis.at[:].set(2 * omega * 0.71)
+
+    # Exchange values across partitions
+    mesh.metric_factor=exchange_elem2D(mesh.metric_factor, partit)
+    mesh.elem_cos=exchange_elem2D(mesh.elem_cos, partit)
+    center_x=exchange_elem2D(center_x, partit)
+    center_y=exchange_elem2D(center_y, partit)
+
+    if cartesian:
+        mesh.elem_cos = 1.0
+        mesh.metric_factor = 0.0
+
+    # Compute distances along edges
+    for n in range(myDim_edge2D + eDim_edge2D):
+        ed = mesh.edges[:, n]
+        a = mesh.coord_nod2D[:, ed[1]] - mesh.coord_nod2D[:, ed[0]]
+        a = a.at[0].set(trim_cyclic(a[0], cyclic_length))
+        mesh.edge_dxdy = mesh.edge_dxdy.at[:, n].set(a)
+
+    # Compute cross distances for edges
+    for n in range(myDim_edge2D + eDim_edge2D):
+        ed = mesh.edges[:, n]
+        el = mesh.edge_tri[:, n]
+        a = edge_center(ed[0], ed[1], mesh, cyclic_length)
+        b = jnp.array([center_x[el[0]], center_y[el[0]]]) - a
+        b = b.at[0].set(trim_cyclic(b[0], cyclic_length))
+        b = b.at[0].set(b[0]*mesh.elem_cos[el[0]])
+        mesh.edge_cross_dxdy = mesh.edge_cross_dxdy.at[0:2, n].set(b * r_earth)
+        if ((n==0) & (mype==0)):
+            print("edgecheck", a, mesh.edge_cross_dxdy[0:2, n])
+        if el[1] > 0:
+            b = jnp.array([center_x[el[1]], center_y[el[1]]]) - jnp.array(a)
+            b = b.at[0].set(trim_cyclic(b[0], cyclic_length))
+            b = b.at[0].set(b[0] * mesh.elem_cos[el[1]])
+            mesh.edge_cross_dxdy = mesh.edge_cross_dxdy.at[2:4, n].set(b * r_earth)
+        else:
+            mesh.edge_cross_dxdy = mesh.edge_cross_dxdy.at[2:4, n].set(0.0)
+
+    # Compute derivatives of scalar quantities
+    for elem in range(myDim_elem2D):
+        elnodes = mesh.elem2D[:, elem]
+        deltaX31 = mesh.coord_nod2D[0, elnodes[2]] - mesh.coord_nod2D[0, elnodes[0]]
+        deltaX31=trim_cyclic(deltaX31,cyclic_length)
+        deltaX31 *= mesh.elem_cos[elem]
+        deltaX21 = mesh.coord_nod2D[0, elnodes[1]] - mesh.coord_nod2D[0, elnodes[0]]
+        deltaX21=trim_cyclic(deltaX21,cyclic_length)
+        deltaX21 *= mesh.elem_cos[elem]
+        deltaY31 = mesh.coord_nod2D[1, elnodes[2]] - mesh.coord_nod2D[1, elnodes[0]]
+        deltaY21 = mesh.coord_nod2D[1, elnodes[1]] - mesh.coord_nod2D[1, elnodes[0]]
+        dfactor = -0.5 * r_earth / mesh.elem_area[elem]
+        mesh.gradient_sca = mesh.gradient_sca.at[:, elem].set(jnp.array([
+            (-deltaY31 + deltaY21) * dfactor,
+            deltaY31 * dfactor,
+            -deltaY21 * dfactor,
+            (deltaX31 - deltaX21) * dfactor,
+            -deltaX31 * dfactor,
+            deltaX21 * dfactor
+        ]))
+
+    # Compute derivatives of vector quantities using least squares
+    for elem in range(myDim_elem2D):
+        a = jnp.array([center_x[elem], center_y[elem]])
+        x, y = jnp.zeros(3), jnp.zeros(3)
+        for j in range(3):
+            el = mesh.elem_neighbors[j, elem]
+            if el > 0:
+                b = jnp.array([center_x[el], center_y[el]])
+                x = x.at[j].set(b[0] - a[0])
+                x = x.at[j].set(trim_cyclic(x[j], cyclic_length))
+                y = y.at[j].set(b[1] - a[1])
+            else:
+                ed = mesh.edges[:, mesh.elem_edges[j, elem]]
+                b = edge_center(ed[0], ed[1], mesh, cyclic_length)
+                x = x.at[j].set(2 * (b[0] - a[0]))
+                x = x.at[j].set(trim_cyclic(x[j], cyclic_length))
+                y = y.at[j].set(2 * (b[1] - a[1]))
+        x *= mesh.elem_cos[elem] * r_earth
+        y *= r_earth
+        cxx = jnp.sum(x ** 2)
+        cxy = jnp.sum(x * y)
+        cyy = jnp.sum(y ** 2)
+        d = cxy ** 2 - cxx * cyy
+        mesh.gradient_vec = mesh.gradient_vec.at[0:3, elem].set((cxy * y - cyy * x) / d)
+        mesh.gradient_vec = mesh.gradient_vec.at[3:6, elem].set((cxy * x - cxx * y) / d)
+
+    sum_X = jnp.sum(jnp.abs(jnp.sum(mesh.gradient_sca[0:3, :myDim_elem2D], 0)))
+    sum_Y = jnp.sum(jnp.abs(jnp.sum(mesh.gradient_sca[3:6, :myDim_elem2D], 0)))
+    sum_X_ABS = jnp.sum(jnp.sum(jnp.abs(mesh.gradient_sca[0:3, :myDim_elem2D]), 0))
+    sum_Y_ABS = jnp.sum(jnp.sum(jnp.abs(mesh.gradient_sca[3:6, :myDim_elem2D]), 0))
+
+    #print("gradient check x", mype, sum_X, sum_X_ABS)
+    #print("gradient check y", mype, sum_Y, sum_Y_ABS)
+
+    print("gradient supercheck1", mype, mesh.gradient_sca[:, 0])
+    print("gradient supercheck2", mype, mesh.gradient_sca[:, myDim_elem2D-1])
+    # Deallocate resources
+    del center_x, center_y
+    return mesh, partit
+
+def test_divergence_core(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
+                         eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
+                         edges, edge_tri, edge_cross_dxdy, cyclic_length):
+    """
+    Core function for test_divergence without MPI dependencies.
+    """
+    # Allocate arrays
+    ssh_rhs = jnp.zeros(myDim_nod2D + eDim_nod2D)
+    velx = jnp.zeros(myDim_elem2D + eDim_elem2D + eXDim_elem2D)
+    vely = jnp.zeros(myDim_elem2D + eDim_elem2D + eXDim_elem2D)
+
+    # Initialize `velx` and `vely` based on element centers
+    for i in range(myDim_elem2D):
+        velx = velx.at[i].set(elem_center(i, elem2D, coord_nod2D, cyclic_length)[0])
+        vely = vely.at[i].set(elem_center(i, elem2D, coord_nod2D, cyclic_length)[1])
+
+    # Initialize SSH right-hand side to zero
+    ssh_rhs = ssh_rhs.at[:].set(0.0)
+
+    # Main computation loop
+    for n in range(1):
+        for ed in range(myDim_edge2D):
+            # Nodes and elements for this edge
+            enodes = edges[:, ed]
+            el = edge_tri[:, ed]
+
+            # Compute flux perpendicular to the edge from element el(1)
+            deltaX1 = edge_cross_dxdy[0, ed]
+            deltaY1 = edge_cross_dxdy[1, ed]
+            c1 = vely[el[0]] * deltaX1 - velx[el[0]] * deltaY1
+
+            # Using jnp.where to handle the conditional logic
+            deltaX2 = jnp.where(el[1] > 0, edge_cross_dxdy[2, ed], 0.0)
+            deltaY2 = jnp.where(el[1] > 0, edge_cross_dxdy[3, ed], 0.0)
+            c2 = jnp.where(el[1] > 0, -(vely[el[1]] * deltaX2 + velx[el[1]] * deltaY2), 0.0)
+
+            # Update ssh_rhs for each node in enodes
+            flux_contribution = c1 + c2
+            ssh_rhs = ssh_rhs.at[enodes[0]].add(flux_contribution)
+            ssh_rhs = ssh_rhs.at[enodes[1]].add(-flux_contribution)
+
+    # Compute min, max, and sum for debug output
+    minval = jnp.min(ssh_rhs)
+    maxval = jnp.max(ssh_rhs)
+    sumval = jnp.sum(ssh_rhs)
+    return ssh_rhs, minval, maxval, sumval
+# Apply jax.jit as a function with static arguments
+test_divergence_core = jax.jit(test_divergence_core, static_argnums=(1, 2, 3, 4, 5, 6, 7))
+def test_divergence(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
+                    eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
+                    edges, edge_tri, edge_cross_dxdy, cyclic_length):
+    return test_divergence_core(
+        mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
+        eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
+        edges, edge_tri, edge_cross_dxdy, cyclic_length
+    )
