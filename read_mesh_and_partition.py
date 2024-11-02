@@ -929,11 +929,8 @@ def find_neighbors(mesh, partit):
             mesh.nod_in_elem2D_num = mesh.nod_in_elem2D_num.at[node].add(1)
             mesh.nod_in_elem2D     = mesh.nod_in_elem2D.at[mesh.nod_in_elem2D_num[node]-1, node].set(n)
 
-    print("jnp.min/max(mesh.nod_in_elem2D_num) before =", partit.mype, jnp.min(mesh.nod_in_elem2D_num), jnp.max(mesh.nod_in_elem2D_num), partit.myDim_elem2D)
     # Exchange nod_in_elem2D_num between processors
     mesh.nod_in_elem2D_num=exchange_nod2D_i(mesh.nod_in_elem2D_num, partit)
-    print("jnp.min/max(mesh.nod_in_elem2D_num) after =", partit.mype, jnp.min(mesh.nod_in_elem2D_num), jnp.max(mesh.nod_in_elem2D_num), partit.myDim_elem2D)
-    
     # Temporary array for global element numbers
     temp_i = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.int32)
     for n in range(max_rmax):
@@ -956,8 +953,6 @@ def find_neighbors(mesh, partit):
             mesh.nod_in_elem2D = mesh.nod_in_elem2D.at[j, n].set(temp_i[mesh.nod_in_elem2D[j, n]])
 
     del temp_i
-    if (mype == 0):
-       print("super check 1:", mype, mesh.nod_in_elem2D[:, partit.myDim_nod2D-1])
     # Validate that each element has at least two valid neighbors
     for elem in range(partit.myDim_elem2D):
         elem1 = 0
@@ -1074,9 +1069,6 @@ def mesh_areas(mesh, partit, cartesian, cyclic_length, r_earth):
     mesh.elem_area = exchange_elem2D(mesh.elem_area, partit)
 
     elnodes = mesh.elem2D[:, 0]
-    print("x coord check:", mype, mesh.coord_nod2D[0, elnodes])
-    print("y coord check:", mype, mesh.coord_nod2D[1, elnodes])
-
     # Compute areas of upper/lower scalar cell edges
     for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
         for j in range(mesh.nod_in_elem2D_num[n]):
@@ -1096,11 +1088,8 @@ def mesh_areas(mesh, partit, cartesian, cyclic_length, r_earth):
 #    mesh.areasvol = exchange_nod3D(mesh.areasvol, partit)
     if (mype==0):
         n=partit.myDim_nod2D-1
-        print("node area check 1:", n, mesh.nod_in_elem2D_num[n])
         for j in range(mesh.nod_in_elem2D_num[n]):
             elem = mesh.nod_in_elem2D[j, n]
-            print("node area check 2:", j, elem, mesh.elem_area[elem])
-
         elem = mesh.nod_in_elem2D[j, n]
 #    print("elem area check:", mype, mesh.elem_area[0], mesh.elem_area[partit.myDim_elem2D-1], jnp.sum(mesh.elem_area[:partit.myDim_elem2D]))
 #    print("node area check:", mype, mesh.area[1,0], mesh.area[1,partit.myDim_nod2D-1], jnp.sum(mesh.area[1,:partit.myDim_nod2D]))
@@ -1358,11 +1347,78 @@ def test_divergence_core(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_ele
     sumval = jnp.sum(ssh_rhs)
     return ssh_rhs, minval, maxval, sumval
 # Apply jax.jit as a function with static arguments
-test_divergence_core = jax.jit(test_divergence_core, static_argnums=(1, 2, 3, 4, 5, 6, 7))
+test_divergence_core = jax.jit(test_divergence_core, static_argnums=(0, 1, 2, 3, 4, 5, 6, 7, 13))
 def test_divergence(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
                     eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
                     edges, edge_tri, edge_cross_dxdy, cyclic_length):
     return test_divergence_core(
+        mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
+        eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
+        edges, edge_tri, edge_cross_dxdy, cyclic_length
+    )
+
+
+@jax.jit
+def compute_flux(el, deltaX1, deltaY1, velx, vely, deltaX2, deltaY2):
+    # Compute fluxes for each edge based on element centers using jnp.where
+    c1 = vely[el[0]] * deltaX1 - velx[el[0]] * deltaY1
+
+    # Use jnp.where to handle the conditional
+    c2 = jnp.where(
+        el[1] > 0,
+        -(vely[el[1]] * deltaX2 + velx[el[1]] * deltaY2),
+        0.0
+    )
+
+    return c1 + c2
+
+
+def test_divergence_core2(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
+                         eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
+                         edges, edge_tri, edge_cross_dxdy, cyclic_length):
+    # Allocate arrays
+    ssh_rhs = jnp.zeros(myDim_nod2D + eDim_nod2D)
+
+    # Initialize `velx` and `vely` using vmap to compute element centers in parallel
+    velx, vely = vmap(lambda i: elem_center(i, elem2D, coord_nod2D, cyclic_length))(jnp.arange(myDim_elem2D)).T
+
+    # Initialize SSH right-hand side to zero (already zeroed in allocation)
+
+    # Vectorized edge loop for flux calculations
+    def edge_update(ed, ssh_rhs):
+        enodes = edges[:, ed]
+        el = edge_tri[:, ed]
+
+        # Unpack cross products for edge flux calculation
+        deltaX1, deltaY1, deltaX2, deltaY2 = edge_cross_dxdy[:, ed]
+
+        # Compute flux contribution for each edge
+        flux_contribution = compute_flux(el, deltaX1, deltaY1, velx, vely, deltaX2, deltaY2)
+
+        # Update ssh_rhs for each node in enodes
+        ssh_rhs = ssh_rhs.at[enodes[0]].add(flux_contribution)
+        ssh_rhs = ssh_rhs.at[enodes[1]].add(-flux_contribution)
+
+        return ssh_rhs
+
+    # Use a loop over the edges with lax.scan for better compilation speed
+    from jax import lax
+    ssh_rhs = lax.fori_loop(0, myDim_edge2D, edge_update, ssh_rhs)
+
+    # Compute min, max, and sum for debug output
+    minval = jnp.min(ssh_rhs)
+    maxval = jnp.max(ssh_rhs)
+    sumval = jnp.sum(ssh_rhs)
+
+    return ssh_rhs, minval, maxval, sumval
+
+
+# Apply jax.jit as a function with static arguments
+test_divergence_core2 = jax.jit(test_divergence_core2, static_argnums=(0, 1, 2, 3, 4, 5, 6, 7, 13))
+def test_divergence2(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
+                    eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
+                    edges, edge_tri, edge_cross_dxdy, cyclic_length):
+    return test_divergence_core2(
         mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
         eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
         edges, edge_tri, edge_cross_dxdy, cyclic_length
