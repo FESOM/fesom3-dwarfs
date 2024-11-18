@@ -56,7 +56,15 @@ class Mesh:
     ssh_stiff: SparseMatrix = field(default_factory=SparseMatrix)
     coriolis: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
     coriolis_node: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
-
+    hnode: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    hnode_new: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    hbar: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+    hbar_old: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+    helem: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    dhe: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+    zbar_3d_n: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    Z_3d_n: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    Z_3d_n_ib: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
 # CommunicationStruct class (com_struct equivalent)
 @dataclass
 class CommunicationStruct:
@@ -98,3 +106,6 @@ class Partitioning:
     remPtr_elem2D: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
     remList_elem2D: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
 
+@dataclass
+class Dynamics:
+    ssh_rhs_old: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))

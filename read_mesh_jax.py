@@ -8,7 +8,7 @@ from jax import random
 from jax import ops
 from array_interfaces import array_factory, JaxStyleNumpyArray
 import numpy as np
-from data_types import Mesh, Partitioning
+from data_types import Mesh, Partitioning, Dynamics
 from read_write_mesh_binary import *
 force_rotation = True
 
@@ -27,6 +27,7 @@ npes=MPI.COMM_WORLD.Get_size()
 mype=MPI.COMM_WORLD.Get_rank()
 MPI_COMM_FESOM=MPI.COMM_WORLD
 partit = Partitioning(npes=npes, mype=mype, MPI_COMM_FESOM=MPI_COMM_FESOM)
+dynamics=Dynamics()
 # Ensure we have exactly 4 MPI tasks
 assert npes == 4, "This example requires exactly 4 MPI tasks."
 meshpath = '/home/dsidoren/myapps/test/pi/'
@@ -35,7 +36,10 @@ set_mesh_transform_matrix(50.*jnp.pi/180., 15.*jnp.pi/180., -90.*jnp.pi/180.)
 
 cyclic_length=2.*jnp.pi
 r_earth=6367500.0
-
+g=9.8
+dt=1800.
+alpha=0.5
+theta=0.5
 do_read_mesh_ascii=False
 
 import pickle
@@ -57,6 +61,9 @@ else:
     partit.MPI_COMM_FESOM = MPI_COMM_FESOM
     mesh = load_data("mesh", mype)
 
+
+    mesh=init_ale(mesh, partit, dynamics)
+    init_stiff_mat_ale(mesh, partit, meshpath, g, dt, alpha, theta)
 import time
 
 #call it first time (will be long since needs be compiled)
@@ -72,11 +79,12 @@ if (partit.mype) == 0:
 
 #call it second time (shall be fast)
 t1 = time.time()
-ssh_rhs, minval, maxval, sumval = test_divergence2(mype=partit.mype, myDim_edge2D = partit.myDim_edge2D,
-    eDim_edge2D = partit.eDim_edge2D, myDim_elem2D = partit.myDim_elem2D, eDim_elem2D = partit.eDim_elem2D,
-    eXDim_elem2D = partit.eXDim_elem2D, myDim_nod2D = partit.myDim_nod2D, eDim_nod2D = partit.eDim_nod2D,
-    elem2D=mesh.elem2D, coord_nod2D=mesh.coord_nod2D, edges=mesh.edges, edge_tri=mesh.edge_tri, edge_cross_dxdy=mesh.edge_cross_dxdy,
-    cyclic_length=cyclic_length)
+for i in range(1000):
+    ssh_rhs, minval, maxval, sumval = test_divergence2(mype=partit.mype, myDim_edge2D = partit.myDim_edge2D,
+        eDim_edge2D = partit.eDim_edge2D, myDim_elem2D = partit.myDim_elem2D, eDim_elem2D = partit.eDim_elem2D,
+        eXDim_elem2D = partit.eXDim_elem2D, myDim_nod2D = partit.myDim_nod2D, eDim_nod2D = partit.eDim_nod2D,
+        elem2D=mesh.elem2D, coord_nod2D=mesh.coord_nod2D, edges=mesh.edges, edge_tri=mesh.edge_tri, edge_cross_dxdy=mesh.edge_cross_dxdy,
+        cyclic_length=cyclic_length)
 t2 = time.time()
 if (partit.mype) == 0:
     print(f"div_test: {partit.mype}, minval: {minval}, maxval: {maxval}, sum: {sumval}, time: {t2 - t1}")
