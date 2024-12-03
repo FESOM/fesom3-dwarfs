@@ -108,4 +108,42 @@ class Partitioning:
 
 @dataclass
 class Dynamics:
+    ssh_rhs: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
     ssh_rhs_old: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+    eta_n: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+    deta_n: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+#    u: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+#    v: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    w: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+#    urhs: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+#    vrhs: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+#    urhsAB: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0, 0)))
+#    vrhsAB: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0, 0)))
+
+    UV_rhs   : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0, 0)))
+    UV_rhsAB : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0, 0, 0)))
+    uv       : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0, 0)))
+    AB_order: int = 2
+
+
+@dataclass
+class Dynamics2:
+    ssh_rhs: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+    ssh_rhs_old: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+    eta_n: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+    deta_n: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+#    u: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+#    v: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    w: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+#    urhs: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+#    vrhs: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+#    urhsAB: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0, 0)))
+#    vrhsAB: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0, 0)))
+
+    U_rhs   : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    V_rhs   : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    U_rhsAB : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0, 0)))
+    V_rhsAB : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0, 0)))
+    u       : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    v       : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    AB_order: int = 2

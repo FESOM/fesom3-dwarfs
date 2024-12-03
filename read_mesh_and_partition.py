@@ -541,7 +541,7 @@ def load_edges(mesh, partit, meshpath):
         ipos = partit.myList_elem2D[n] - 1
         mapping = mapping.at[ipos].set(n)
 
-    mesh.edge_tri = jnp.where(mesh.edge_tri < 0, 0, mesh.edge_tri)
+    mesh.edge_tri = jnp.where(mesh.edge_tri < 0, -1, mesh.edge_tri)
     for n in range(partit.myDim_edge2D + partit.eDim_edge2D):
         for m in range(2):
             nn = mesh.edge_tri[m, n]
@@ -762,8 +762,7 @@ def exchange_elem2D(elem_array2D, partit):
     # Store send/receive requests
     sreq = []
     rreq = []
-
-    # Prepare the send buffer
+        # Prepare the send buffer
     for n in range(sn):
         nini = com_elem2D.sptr[n]-1
         nend = com_elem2D.sptr[n + 1] - 2
@@ -785,10 +784,8 @@ def exchange_elem2D(elem_array2D, partit):
         r_buff_elem2D[n] = np.zeros(offset)
         req = comm.Irecv(r_buff_elem2D[n], source=source, tag=source)
         rreq.append(req)
-
     # Wait for all send operations to complete
     MPI.Request.Waitall(sreq)
-
     # Wait for all receive operations to complete
     MPI.Request.Waitall(rreq)
 
@@ -800,7 +797,6 @@ def exchange_elem2D(elem_array2D, partit):
 
     # Optionally convert back to JAX array if necessary
     elem_array2D = jnp.array(elem_array2D_np)
-
     return elem_array2D
 
 def exchange_nod3D(nod_array3D, partit):
@@ -1301,7 +1297,7 @@ def mesh_auxiliary_arrays(mesh, partit, cartesian, fplane, cyclic_length, r_eart
     return mesh, partit
 
 
-def init_ale(mesh, partit, dynamics):
+def init_ale(mesh, partit):
     comm = partit.MPI_COMM_FESOM
     mype = partit.mype
     npes = partit.npes
@@ -1316,34 +1312,32 @@ def init_ale(mesh, partit, dynamics):
     myDim_nod2D = partit.myDim_nod2D
     eDim_nod2D = partit.eDim_nod2D
     # Allocation of arrays
-    mesh.hnode = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
-    mesh.hnode_new = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
-    dynamics.ssh_rhs_old = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.float32)
-
-    mesh.hbar = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.float32)
-    mesh.hbar_old = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.float32)
-    mesh.helem = jnp.zeros((mesh.nl - 1, partit.myDim_elem2D + partit.eDim_nod2D), dtype=jnp.float32)
-    mesh.dhe = jnp.zeros(partit.myDim_elem2D, dtype=jnp.float32)
-    mesh.zbar_3d_n = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
+    mesh.hnode = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D))
+    mesh.hnode_new = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D))
+    mesh.hbar = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
+    mesh.hbar_old = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
+    mesh.helem = jnp.zeros((mesh.nl - 1, partit.myDim_elem2D + partit.eDim_nod2D))
+    mesh.dhe = jnp.zeros(partit.myDim_elem2D)
+    mesh.zbar_3d_n = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D))
 
     # Conditional allocation for asynchronous mode
     if partit.pe_status == 0:  # Assuming ib_async_mode is equivalent to pe_status
-        mesh.Z_3d_n = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
-        mesh.Z_3d_n_ib = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
+        mesh.Z_3d_n = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D))
+        mesh.Z_3d_n_ib = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D))
     else:
-        mesh.Z_3d_n = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
-        mesh.Z_3d_n_ib = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D), dtype=jnp.float32)
+        mesh.Z_3d_n = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D))
+        mesh.Z_3d_n_ib = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D))
         for i in range(partit.myDim_nod2D + partit.eDim_nod2D):
             for j in range(mesh.nl - 1):
                 mesh.Z_3d_n[j, i] = 0.0
                 mesh.Z_3d_n_ib[j, i] = 0.0
 
-    mesh.bottom_elem_thickness = jnp.zeros(partit.myDim_elem2D + partit.eDim_nod2D, dtype=jnp.float32)
-    mesh.zbar_e_bot = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D, dtype=jnp.float32)
-    mesh.zbar_e_srf = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D, dtype=jnp.float32)
-    mesh.bottom_node_thickness = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.float32)
-    mesh.zbar_n_bot = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.float32)
-    mesh.zbar_n_srf = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D, dtype=jnp.float32)
+    mesh.bottom_elem_thickness = jnp.zeros(partit.myDim_elem2D + partit.eDim_nod2D)
+    mesh.zbar_e_bot = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D)
+    mesh.zbar_e_srf = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D)
+    mesh.bottom_node_thickness = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
+    mesh.zbar_n_bot = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
+    mesh.zbar_n_srf = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
 
     # Initialization of arrays
     mesh.hbar = jnp.zeros_like(mesh.hbar)
@@ -1353,8 +1347,8 @@ def init_ale(mesh, partit, dynamics):
     mesh.hnode_new = jnp.zeros_like(mesh.hnode_new)
     mesh.helem = jnp.zeros_like(mesh.helem)
 
-    mesh.zbar_n_bot = jnp.zeros_like(mesh.zbar_n_bot)
-    mesh.zbar_e_bot = jnp.zeros_like(mesh.zbar_e_bot)
+#    mesh.zbar_n_bot = jnp.zeros_like(mesh.zbar_n_bot)
+#    mesh.zbar_e_bot = jnp.zeros_like(mesh.zbar_e_bot)
     mesh.zbar_n_srf = jnp.full_like(mesh.zbar_n_srf, mesh.zbar[0])
     mesh.zbar_e_srf = jnp.full_like(mesh.zbar_e_srf, mesh.zbar[0])
 
@@ -1369,7 +1363,9 @@ def init_ale(mesh, partit, dynamics):
         mesh.bottom_node_thickness = mesh.bottom_node_thickness.at[node].set(mesh.zbar[nln - 1] - mesh.zbar_n_bot[node])
 
     mesh.bottom_elem_thickness=exchange_elem2D(mesh.bottom_elem_thickness, partit)
+
     mesh.zbar_e_bot=exchange_elem2D(mesh.zbar_e_bot, partit)
+
     mesh.zbar_n_bot=exchange_nod2D(mesh.zbar_n_bot, partit)
     mesh.bottom_node_thickness=exchange_nod2D(mesh.bottom_node_thickness, partit)
 
@@ -1381,19 +1377,57 @@ def init_ale(mesh, partit, dynamics):
 
         # Updating zbar_3d_n and Z_3d_n arrays carefully
         mesh.zbar_3d_n = mesh.zbar_3d_n.at[0:nzmin, n].set(mesh.zbar[0:nzmin])
-        mesh.zbar_3d_n = mesh.zbar_3d_n.at[nzmin, n].set(mesh.zbar_n_srf[n])
-        mesh.zbar_3d_n = mesh.zbar_3d_n.at[nzmin + 1:nzmax, n].set(mesh.zbar[nzmin + 1:nzmax])
-        mesh.zbar_3d_n = mesh.zbar_3d_n.at[nzmax, n].set(mesh.zbar_n_bot[n])
+        mesh.zbar_3d_n = mesh.zbar_3d_n.at[nzmin-1, n].set(mesh.zbar_n_srf[n])
+        mesh.zbar_3d_n = mesh.zbar_3d_n.at[nzmin:nzmax, n].set(mesh.zbar[nzmin:nzmax])
+        mesh.zbar_3d_n = mesh.zbar_3d_n.at[nzmax-1, n].set(mesh.zbar_n_bot[n])
 
         mesh.Z_3d_n = mesh.Z_3d_n.at[0:nzmin, n].set(mesh.Z[0:nzmin])
-        mesh.Z_3d_n = mesh.Z_3d_n.at[nzmin, n].set(
-            mesh.zbar_3d_n[nzmin, n] + (mesh.zbar_3d_n[nzmin + 1, n] - mesh.zbar_n_srf[n]) / 2
+        mesh.Z_3d_n = mesh.Z_3d_n.at[nzmin-1, n].set(
+            mesh.zbar_3d_n[nzmin-1, n] + (mesh.zbar_3d_n[nzmin, n] - mesh.zbar_n_srf[n]) / 2
         )
-        mesh.Z_3d_n = mesh.Z_3d_n.at[nzmin + 1:nzmax - 1, n].set(mesh.Z[nzmin + 1:nzmax - 1])
-        mesh.Z_3d_n = mesh.Z_3d_n.at[nzmax - 1, n].set(
-            mesh.zbar_3d_n[nzmax - 1, n] + (mesh.zbar_n_bot[n] - mesh.zbar_3d_n[nzmax - 1, n]) / 2
+        mesh.Z_3d_n = mesh.Z_3d_n.at[nzmin:nzmax - 2, n].set(mesh.Z[nzmin:nzmax - 2])
+        mesh.Z_3d_n = mesh.Z_3d_n.at[nzmax - 2, n].set(
+            mesh.zbar_3d_n[nzmax - 2, n] + (mesh.zbar_n_bot[n] - mesh.zbar_3d_n[nzmax - 2, n]) / 2
         )
     return mesh
+
+
+def init_thickness_ale(mesh, partit):
+
+    comm = partit.MPI_COMM_FESOM
+    mype = partit.mype
+    npes = partit.npes
+
+    myDim_nod2D, eDim_nod2D   = partit.myDim_nod2D, partit.eDim_nod2D
+    myDim_elem2D, eDim_elem2D = partit.myDim_elem2D, partit.eDim_elem2D
+#    dynamics.ssh_rhs_old = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
+#    dynamics.eta_n       = jnp.zeros_like(ssh_rhs_old)
+#    print("mesh.zbar_3d_n=", mesh.zbar_3d_n)
+# Linear Free-Surface
+    for n in range(myDim_nod2D + eDim_nod2D):
+        nzmin = mesh.ulevels_nod2D[n]
+        nzmax = mesh.nlevels_nod2D[n] - 1
+
+        # Set layer thicknesses
+        for nz in range(nzmin-1, nzmax-1):
+            mesh.hnode = mesh.hnode.at[nz, n].set(mesh.zbar_3d_n[nz, n] - mesh.zbar_3d_n[nz + 1, n])
+
+        # Set bottom node thickness
+        mesh.hnode = mesh.hnode.at[nzmax-1, n].set(mesh.bottom_node_thickness[n])
+
+    for elem in range(myDim_elem2D):
+        nzmin = mesh.ulevels[elem]
+        nzmax = mesh.nlevels[elem] - 1
+
+        # Set layer thicknesses
+        mesh.helem = mesh.helem.at[nzmin-1, elem].set(mesh.zbar_e_srf[elem] - mesh.zbar[nzmin])
+        for nz in range(nzmin, nzmax-1):
+            mesh.helem = mesh.helem.at[nz, elem].set(mesh.zbar[nz] - mesh.zbar[nz + 1])
+
+        # Set bottom element thickness
+        mesh.helem = mesh.helem.at[nzmax-1, elem].set(mesh.bottom_elem_thickness[elem])
+    return mesh
+
 
 def init_stiff_mat_ale(mesh, partit, meshpath, g, dt, alpha, theta):
     # Get communicator information
@@ -1425,9 +1459,11 @@ def init_stiff_mat_ale(mesh, partit, meshpath, g, dt, alpha, theta):
         if n1 < partit.myDim_nod2D:
             n_pos = n_pos.at[n_num[n1], n1].set(n2)
             n_num = n_num.at[n1].add(1)
+
         if n2 < partit.myDim_nod2D:
             n_pos = n_pos.at[n_num[n2], n2].set(n1)
             n_num = n_num.at[n2].add(1)
+
 
     # Fill up reduced row vector
     for n in range(partit.myDim_nod2D):
@@ -1437,41 +1473,45 @@ def init_stiff_mat_ale(mesh, partit, meshpath, g, dt, alpha, theta):
 
     # Calculate the number of nonzero entries
     mesh.ssh_stiff.nza = mesh.ssh_stiff.rowptr[partit.myDim_nod2D]
-
+    print("mesh.ssh_stiff.nza=", mype, mesh.ssh_stiff.nza)
     # Allocate column and value arrays of the sparse matrix
     mesh.ssh_stiff.colind = jnp.zeros(mesh.ssh_stiff.nza, dtype=jnp.int32)
     mesh.ssh_stiff.colind_loc = jnp.zeros(mesh.ssh_stiff.nza, dtype=jnp.int32)
-    mesh.ssh_stiff.values = jnp.zeros(mesh.ssh_stiff.nza, dtype=jnp.float32)
+    mesh.ssh_stiff.values = jnp.zeros(mesh.ssh_stiff.nza)
 
     # Fill sparse matrix column index
     for n in range(partit.myDim_nod2D):
         nini = mesh.ssh_stiff.rowptr[n]
-        nend = mesh.ssh_stiff.rowptr[n + 1] - 1
-        mesh.ssh_stiff.colind = mesh.ssh_stiff.colind.at[nini:nend + 1].set(
-            n_pos[:n_num[n], n]
-        )
-
+        nend = mesh.ssh_stiff.rowptr[n + 1]
+        mesh.ssh_stiff.colind = mesh.ssh_stiff.colind.at[nini:nend].set(n_pos[:n_num[n], n])
     mesh.ssh_stiff.colind_loc = mesh.ssh_stiff.colind
     mesh.ssh_stiff.rowptr_loc = mesh.ssh_stiff.rowptr
-
+    print("mesh.ssh_stiff.colind.sum()=", mype, jnp.sum(mesh.ssh_stiff.colind))
     # Stiffness matrix calculations
     factor = g * dt * alpha * theta
-
     # Loop over edges
+    if (mype==0):
+        print("zbar_e_bot", jnp.min(mesh.zbar_e_bot), jnp.max(mesh.zbar_e_bot))
+        print("zbar_e_srf", jnp.min(mesh.zbar_e_srf), jnp.max(mesh.zbar_e_srf))
+
+
     for ed in range(partit.myDim_edge2D):
         el = mesh.edge_tri[:, ed]
         for i in range(2):
-            if el[i] < 1:
-                continue
-
+            if el[i] < 0:
+               continue
             elnodes = mesh.elem2D[:, el[i]]
             fy = (mesh.zbar_e_bot[el[i]] - mesh.zbar_e_srf[el[i]]) * (
-                jnp.dot(
-                    mesh.gradient_sca[:, el[i]].reshape(3, 2),  # Correct the shape here
-                    jnp.array([mesh.edge_cross_dxdy[1, ed], -mesh.edge_cross_dxdy[0, ed]])
-                )
+                    jnp.dot(
+                        mesh.gradient_sca[:3, el[i]], mesh.edge_cross_dxdy[2 * (i+1)-1, ed]
+                    )
+                    - jnp.dot(
+                mesh.gradient_sca[3:6, el[i]], mesh.edge_cross_dxdy[2 * (i+1) - 2, ed]
             )
-
+            )
+            if ((mype==0) & (ed==10)):
+                print("fy:", i, (mesh.zbar_e_bot[el[i]] - mesh.zbar_e_srf[el[i]]), fy, mesh.gradient_sca[:, el[i]], ":", mesh.edge_cross_dxdy[:, ed])
+                
             if i == 1:
                 fy = -fy
 
@@ -1488,7 +1528,6 @@ def init_stiff_mat_ale(mesh, partit, meshpath, g, dt, alpha, theta):
                     n_num = n_num.at[mesh.ssh_stiff.colind[n]].set(n)
                 npos = n_num[elnodes]
                 mesh.ssh_stiff.values = mesh.ssh_stiff.values.at[npos].add(-fy * factor)
-
     # Mass matrix part
     for row in range(partit.myDim_nod2D):
         if mesh.ulevels_nod2D[row] > 1:
@@ -1497,7 +1536,6 @@ def init_stiff_mat_ale(mesh, partit, meshpath, g, dt, alpha, theta):
         mesh.ssh_stiff.values = mesh.ssh_stiff.values.at[offset].add(
             mesh.areasvol[mesh.ulevels_nod2D[row], row] / dt
         )
-
     # MPI communications
     # Convert JAX arrays to NumPy arrays for MPI communication
     pnza = np.zeros(npes, dtype='int32')  # Use explicit NumPy dtype
@@ -1516,7 +1554,7 @@ def init_stiff_mat_ale(mesh, partit, meshpath, g, dt, alpha, theta):
     # Convert local to global indices
     for n in range(mesh.ssh_stiff.rowptr[partit.myDim_nod2D] - mesh.ssh_stiff.rowptr[0]):
         mesh.ssh_stiff.colind = mesh.ssh_stiff.colind.at[n].set(
-            partit.myList_nod2D[mesh.ssh_stiff.colind[n]]
+            partit.myList_nod2D[mesh.ssh_stiff.colind[n]]-1
         )
 
     mapping = np.zeros(mesh.nod2D, dtype=jnp.int32)
@@ -1527,8 +1565,9 @@ def init_stiff_mat_ale(mesh, partit, meshpath, g, dt, alpha, theta):
         print(f"     > in stiff_mat_ale, reading {file_name}")
         with open(file_name, "r") as file:
             n = int(file.readline())
-            mapping_part1 = np.array(list(map(int, file.readline().split()[:npes])), dtype='int32')
-            mapping_data  = np.array(list(map(int, file.readline().split())), dtype='int32')
+            line = file.readline()
+            mapping_part1 = list(map(int, line.split()))
+            mapping       = np.array([int(file.readline().split()[0])-1 for _ in range(mesh.nod2D)], dtype='int32')
 
     comm.Bcast(mapping, root=0)
     mapping = jnp.array(mapping)
@@ -1536,15 +1575,7 @@ def init_stiff_mat_ale(mesh, partit, meshpath, g, dt, alpha, theta):
     for n in range(mesh.ssh_stiff.rowptr[partit.myDim_nod2D] - mesh.ssh_stiff.rowptr[0]):
         mesh.ssh_stiff.colind = mesh.ssh_stiff.colind.at[n].set(mapping[mesh.ssh_stiff.colind[n]])
 
-    for n in range(partit.myDim_nod2D):
-        nini = mesh.ssh_stiff.rowptr[n]
-        nend = mesh.ssh_stiff.rowptr[n + 1] - 1
-        abs_sum = jnp.sum(jnp.abs(mesh.ssh_stiff.values[nini:nend + 1]))
-        regular_sum = jnp.sum(mesh.ssh_stiff.values[nini:nend + 1])
-        # Use print statements to display the results
-        print(abs_sum, regular_sum)
-
-
+    return mesh
 
 def test_divergence_core(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
                          eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
