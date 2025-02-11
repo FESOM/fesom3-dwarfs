@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from mpi4py import MPI
-from mpi4jax import send, recv, bcast
+#from mpi4jax import send, recv, bcast
 from module_rotate_grid import *
 
 def read_mesh_and_partition(mesh, partit, meshpath, force_rotation):
@@ -870,6 +870,79 @@ def exchange_nod3D(nod_array3D, partit):
 
     return nod_array3D
 
+def exchange_elem3D(elem_array3D, partit):
+    comm = partit.MPI_COMM_FESOM
+    mype = partit.mype
+    npes = partit.npes
+    com_elem2D = partit.com_elem2D
+
+    # Get the number of send/receive processes
+    sn = com_elem2D.sPEnum
+    rn = com_elem2D.rPEnum
+
+    # Convert elem_array3D to NumPy array if necessary (to ensure it's writable)
+    elem_array3D_np = np.array(elem_array3D, copy=True)
+    nl1 = elem_array3D_np.shape[0]  # Size in the vertical dimension
+
+    # Buffers for send and receive operations
+    s_buff_elem3D = [None] * sn
+    r_buff_elem3D = [None] * rn
+
+    # Store send/receive requests
+    sreq = []
+    rreq = []
+
+    # Prepare the send buffer
+    for n in range(sn):
+        nini = com_elem2D.sptr[n] - 1
+        nend = com_elem2D.sptr[n + 1] - 2
+        nc = 0
+        s_buff_elem3D[n] = np.zeros((nl1 * (nend - nini + 1)))
+        for nh in range(nini, nend + 1):
+            for nz in range(nl1):
+                s_buff_elem3D[n][nc] = elem_array3D_np[nz, com_elem2D.slist[nh] - 1]
+                nc += 1
+
+    # Non-blocking MPI send
+    for n in range(sn):
+        dest = com_elem2D.sPE[n]
+        nini = com_elem2D.sptr[n]
+        offset = (com_elem2D.sptr[n + 1] - nini) * nl1
+        req = comm.Isend(s_buff_elem3D[n], dest=dest, tag=mype)
+        sreq.append(req)
+
+    # Non-blocking MPI receive
+    for n in range(rn):
+        source = com_elem2D.rPE[n]
+        nini = com_elem2D.rptr[n]
+        offset = (com_elem2D.rptr[n + 1] - nini) * nl1
+        r_buff_elem3D[n] = np.zeros(offset)
+        req = comm.Irecv(r_buff_elem3D[n], source=source, tag=source)
+        rreq.append(req)
+
+    # Wait for all send operations to complete
+    MPI.Request.Waitall(sreq)
+
+    # Wait for all receive operations to complete
+    MPI.Request.Waitall(rreq)
+
+    # Place received data into the appropriate positions in the original array
+    for n in range(rn):
+        nini = com_elem2D.rptr[n] - 1
+        nend = com_elem2D.rptr[n + 1] - 2
+        nc = 0
+        for nh in range(nini, nend + 1):
+            for nz in range(nl1):
+                elem_array3D_np[nz, com_elem2D.rlist[nh] - 1] = r_buff_elem3D[n][nc]
+                nc += 1
+
+    # Optionally convert back to JAX array if necessary
+    elem_array3D = jnp.array(elem_array3D_np)
+
+    return elem_array3D
+
+
+
 def find_neighbors(mesh, partit):
     comm = partit.MPI_COMM_FESOM
     mype = partit.mype
@@ -1406,7 +1479,7 @@ def init_thickness_ale(mesh, partit):
 # Linear Free-Surface
     for n in range(myDim_nod2D + eDim_nod2D):
         nzmin = mesh.ulevels_nod2D[n]
-        nzmax = mesh.nlevels_nod2D[n] - 1
+        nzmax = mesh.nlevels_nod2D[n] #- 1
 
         # Set layer thicknesses
         for nz in range(nzmin-1, nzmax-1):
@@ -1415,10 +1488,12 @@ def init_thickness_ale(mesh, partit):
         # Set bottom node thickness
         mesh.hnode = mesh.hnode.at[nzmax-1, n].set(mesh.bottom_node_thickness[n])
 
+    if (partit.mype==1):
+        print("nlevels check:",  mesh.nlevels[8])
+
     for elem in range(myDim_elem2D):
         nzmin = mesh.ulevels[elem]
-        nzmax = mesh.nlevels[elem] - 1
-
+        nzmax = mesh.nlevels[elem]# - 1
         # Set layer thicknesses
         mesh.helem = mesh.helem.at[nzmin-1, elem].set(mesh.zbar_e_srf[elem] - mesh.zbar[nzmin])
         for nz in range(nzmin, nzmax-1):
@@ -1426,6 +1501,7 @@ def init_thickness_ale(mesh, partit):
 
         # Set bottom element thickness
         mesh.helem = mesh.helem.at[nzmax-1, elem].set(mesh.bottom_elem_thickness[elem])
+    mesh.helem = exchange_elem3D(mesh.helem, partit)
     return mesh
 
 
@@ -1576,127 +1652,3 @@ def init_stiff_mat_ale(mesh, partit, meshpath, g, dt, alpha, theta):
         mesh.ssh_stiff.colind = mesh.ssh_stiff.colind.at[n].set(mapping[mesh.ssh_stiff.colind[n]])
 
     return mesh
-
-def test_divergence_core(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
-                         eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
-                         edges, edge_tri, edge_cross_dxdy, cyclic_length):
-    """
-    Core function for test_divergence without MPI dependencies.
-    """
-    # Allocate arrays
-    ssh_rhs = jnp.zeros(myDim_nod2D + eDim_nod2D)
-    velx = jnp.zeros(myDim_elem2D + eDim_elem2D + eXDim_elem2D)
-    vely = jnp.zeros(myDim_elem2D + eDim_elem2D + eXDim_elem2D)
-
-    # Initialize `velx` and `vely` based on element centers
-    for i in range(myDim_elem2D):
-        velx = velx.at[i].set(elem_center(i, elem2D, coord_nod2D, cyclic_length)[0])
-        vely = vely.at[i].set(elem_center(i, elem2D, coord_nod2D, cyclic_length)[1])
-
-    # Initialize SSH right-hand side to zero
-    ssh_rhs = ssh_rhs.at[:].set(0.0)
-
-    # Main computation loop
-    for n in range(1):
-        for ed in range(myDim_edge2D):
-            # Nodes and elements for this edge
-            enodes = edges[:, ed]
-            el = edge_tri[:, ed]
-
-            # Compute flux perpendicular to the edge from element el(1)
-            deltaX1 = edge_cross_dxdy[0, ed]
-            deltaY1 = edge_cross_dxdy[1, ed]
-            c1 = vely[el[0]] * deltaX1 - velx[el[0]] * deltaY1
-
-            # Using jnp.where to handle the conditional logic
-            deltaX2 = jnp.where(el[1] > 0, edge_cross_dxdy[2, ed], 0.0)
-            deltaY2 = jnp.where(el[1] > 0, edge_cross_dxdy[3, ed], 0.0)
-            c2 = jnp.where(el[1] > 0, -(vely[el[1]] * deltaX2 + velx[el[1]] * deltaY2), 0.0)
-
-            # Update ssh_rhs for each node in enodes
-            flux_contribution = c1 + c2
-            ssh_rhs = ssh_rhs.at[enodes[0]].add(flux_contribution)
-            ssh_rhs = ssh_rhs.at[enodes[1]].add(-flux_contribution)
-
-    # Compute min, max, and sum for debug output
-    minval = jnp.min(ssh_rhs)
-    maxval = jnp.max(ssh_rhs)
-    sumval = jnp.sum(ssh_rhs)
-    return ssh_rhs, minval, maxval, sumval
-# Apply jax.jit as a function with static arguments
-test_divergence_core = jax.jit(test_divergence_core, static_argnums=(0, 1, 2, 3, 4, 5, 6, 7, 13))
-def test_divergence(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
-                    eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
-                    edges, edge_tri, edge_cross_dxdy, cyclic_length):
-    return test_divergence_core(
-        mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
-        eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
-        edges, edge_tri, edge_cross_dxdy, cyclic_length
-    )
-
-
-@jax.jit
-def compute_flux(el, deltaX1, deltaY1, velx, vely, deltaX2, deltaY2):
-    # Compute fluxes for each edge based on element centers using jnp.where
-    c1 = vely[el[0]] * deltaX1 - velx[el[0]] * deltaY1
-
-    # Use jnp.where to handle the conditional
-    c2 = jnp.where(
-        el[1] > 0,
-        -(vely[el[1]] * deltaX2 + velx[el[1]] * deltaY2),
-        0.0
-    )
-
-    return c1 + c2
-
-
-def test_divergence_core2(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
-                         eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
-                         edges, edge_tri, edge_cross_dxdy, cyclic_length):
-    # Allocate arrays
-    ssh_rhs = jnp.zeros(myDim_nod2D + eDim_nod2D)
-
-    # Initialize `velx` and `vely` using vmap to compute element centers in parallel
-    velx, vely = vmap(lambda i: elem_center(i, elem2D, coord_nod2D, cyclic_length))(jnp.arange(myDim_elem2D)).T
-
-    # Initialize SSH right-hand side to zero (already zeroed in allocation)
-
-    # Vectorized edge loop for flux calculations
-    def edge_update(ed, ssh_rhs):
-        enodes = edges[:, ed]
-        el = edge_tri[:, ed]
-
-        # Unpack cross products for edge flux calculation
-        deltaX1, deltaY1, deltaX2, deltaY2 = edge_cross_dxdy[:, ed]
-
-        # Compute flux contribution for each edge
-        flux_contribution = compute_flux(el, deltaX1, deltaY1, velx, vely, deltaX2, deltaY2)
-
-        # Update ssh_rhs for each node in enodes
-        ssh_rhs = ssh_rhs.at[enodes[0]].add(flux_contribution)
-        ssh_rhs = ssh_rhs.at[enodes[1]].add(-flux_contribution)
-
-        return ssh_rhs
-
-    # Use a loop over the edges with lax.scan for better compilation speed
-    from jax import lax
-    ssh_rhs = lax.fori_loop(0, myDim_edge2D, edge_update, ssh_rhs)
-
-    # Compute min, max, and sum for debug output
-    minval = jnp.min(ssh_rhs)
-    maxval = jnp.max(ssh_rhs)
-    sumval = jnp.sum(ssh_rhs)
-
-    return ssh_rhs, minval, maxval, sumval
-
-
-# Apply jax.jit as a function with static arguments
-test_divergence_core2 = jax.jit(test_divergence_core2, static_argnums=(0, 1, 2, 3, 4, 5, 6, 7, 13))
-def test_divergence2(mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
-                    eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
-                    edges, edge_tri, edge_cross_dxdy, cyclic_length):
-    return test_divergence_core2(
-        mype, myDim_edge2D, eDim_edge2D, myDim_elem2D, eDim_elem2D,
-        eXDim_elem2D, myDim_nod2D, eDim_nod2D, elem2D, coord_nod2D,
-        edges, edge_tri, edge_cross_dxdy, cyclic_length
-    )

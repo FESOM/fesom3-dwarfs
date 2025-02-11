@@ -1,20 +1,20 @@
 import os
 import jax
-import pytest
+#import pytest
 import jax.numpy as jnp
 from mpi4py import MPI
-from mpi4jax import send, recv, bcast
+#from mpi4jax import send, recv, bcast
 from jax import random
 from jax import ops
 from array_interfaces import array_factory, JaxStyleNumpyArray
 import numpy as np
-from data_types import Mesh, Partitioning, Dynamics, Dynamics2
+from data_types import Mesh, Partitioning, Dynamics
 from read_write_mesh_binary import *
 force_rotation = True
 
 # Set up environment variables for OpenMP
 os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MPI4JAX_USE_CUDA_MPI"] = "1"
+#os.environ["MPI4JAX_USE_CUDA_MPI"] = "1"
 
 # Ensure JAX uses the GPU
 jax.config.update('jax_platform_name', 'cpu')
@@ -28,7 +28,6 @@ mype=MPI.COMM_WORLD.Get_rank()
 MPI_COMM_FESOM=MPI.COMM_WORLD
 partit = Partitioning(npes=npes, mype=mype, MPI_COMM_FESOM=MPI_COMM_FESOM)
 dynamics =Dynamics()
-dynamics2=Dynamics2()
 # Ensure we have exactly 4 MPI tasks
 assert npes == 4, "This example requires exactly 4 MPI tasks."
 meshpath = '/home/dsidoren/myapps/test/pi/'
@@ -37,7 +36,7 @@ set_mesh_transform_matrix(50.*jnp.pi/180., 15.*jnp.pi/180., -90.*jnp.pi/180.)
 
 cyclic_length=2.*jnp.pi
 r_earth=6367500.0
-g=9.8
+g=9.81
 dt=1800.
 alpha=1.0
 theta=1.0
@@ -66,76 +65,126 @@ else:
     mesh = load_data("mesh", mype)
 import time
 
-
+#mesh.helem = exchange_elem2D(mesh.helem, partit)
 from oce_dynamics import *
 
 dynamics.eta_n = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
-dynamics.UV_rhs = jnp.zeros((2, mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
-dynamics.UV_rhsAB = jnp.zeros((2, 2, mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
-dynamics.uv = jnp.zeros((2, mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
+dynamics.U_rhs = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
+dynamics.V_rhs = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
+dynamics.U_rhsAB = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D, 2))
+dynamics.V_rhsAB = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D, 2))
+dynamics.u = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
+dynamics.v = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
+dynamics.u_c = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
+dynamics.v_c = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
+dynamics.w = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D))
+dynamics.w_i = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D))
+dynamics.eta_n = mesh.coord_nod2D[0,:]
 
-dynamics2.eta_n = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
-dynamics2.U_rhs = jnp.zeros((partit.myDim_elem2D + partit.eDim_elem2D, mesh.nl-1))
-dynamics2.V_rhs = jnp.zeros((partit.myDim_elem2D + partit.eDim_elem2D, mesh.nl-1))
-dynamics2.U_rhsAB = jnp.zeros((partit.myDim_elem2D + partit.eDim_elem2D, mesh.nl-1, 2))
-dynamics2.V_rhsAB = jnp.zeros((partit.myDim_elem2D + partit.eDim_elem2D, mesh.nl-1, 2))
-dynamics2.u = jnp.zeros((partit.myDim_elem2D + partit.eDim_elem2D, mesh.nl-1))
-dynamics2.v = jnp.zeros((partit.myDim_elem2D + partit.eDim_elem2D, mesh.nl-1))
+stress_surf=jnp.zeros((2, partit.myDim_elem2D + partit.eDim_elem2D))
+dynamics.Av=jnp.zeros((mesh.nl, partit.myDim_elem2D + partit.eDim_elem2D))
+dynamics.Av = dynamics.Av.at[:,:].set(1.)
+stress_surf = stress_surf.at[:,:].set(1.)
+C_d=1.0#1.e-3
 
-compute_vel_rhs_opt2_jit(dynamics2.u, dynamics2.v, dynamics2.U_rhs, dynamics2.V_rhs, dynamics2.U_rhsAB, dynamics2.V_rhsAB, dynamics.eta_n, dynamics.AB_order, mesh.elem_area, mesh.gradient_sca, mesh.coriolis, mesh.ulevels, mesh.nlevels, mesh.elem2D, partit.myDim_elem2D, g, dt)
+arr = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
+arr = arr.at[:, :partit.myDim_elem2D].set(1)
+print("before: ", arr.min(), arr.max())
+arr=exchange_elem3D(arr, partit)
+print("after : ", arr.min(), arr.max())
+
 t1 = time.time()
-for i in range(10):
-    compute_vel_rhs_opt2_jit(dynamics2.u, dynamics2.v, dynamics2.U_rhs, dynamics2.V_rhs, dynamics2.U_rhsAB, dynamics2.V_rhsAB, dynamics.eta_n, dynamics.AB_order, mesh.elem_area, mesh.gradient_sca, mesh.coriolis, mesh.ulevels, mesh.nlevels, mesh.elem2D, partit.myDim_elem2D, g, dt)
+U_rhs, V_rhs, U_rhsAB, V_rhsAB = compute_vel_rhs_opt_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.U_rhsAB, dynamics.V_rhsAB, dynamics.eta_n, dynamics.AB_order, mesh.elem_area, mesh.gradient_sca, mesh.coriolis, mesh.ulevels, mesh.nlevels, mesh.elem2D, partit.myDim_elem2D, g, dt)
 t2 = time.time()
-if (partit.mype) == 0: print("compute rhs optimized split (jax, lax):", t2 - t1)
+if (partit.mype==0):
+    print("compilation time for compute_vel_rhs_opt_jit:", t2 - t1)
+
+if partit.mype == 1:
+    print(mesh.nlevels[8])
+if partit.mype == 1:
+    print("U_rhs", U_rhs[:,8])
 
 #t1 = time.time()
-#for i in range(10):
-#    compute_vel_rhs(dynamics, partit, mesh, g, dt)
+#dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c = visc_filt_bilapl_jit(
+#    dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c,
+#    mesh.ulevels, mesh.nlevels, mesh.elem_area, mesh.edge_tri,
+#    dynamics.visc_gamma0, dynamics.visc_gamma1, dynamics.visc_gamma2,
+#    dt, partit.myDim_elem2D, partit.eDim_elem2D, partit.myDim_edge2D, partit.eDim_edge2D
+#)
 #t2 = time.time()
-#if (partit.mype) == 0: print("compute rhs unoptimized (jax, lax):", t2 - t1)
+#if (partit.mype==0):
+#    print("compilation time for visc_filt_bilapl_jit:", t2 - t1)
+
 
 t1 = time.time()
-for i in range(10):
-    compute_vel_rhs_opt(dynamics.uv, dynamics.UV_rhs, dynamics.UV_rhsAB, dynamics.eta_n, dynamics.AB_order, mesh.elem_area, mesh.gradient_sca, mesh.coriolis, mesh.ulevels, mesh.nlevels, mesh.elem2D, partit.myDim_elem2D, g, dt)
+for i in range (5):
+    dynamics.U_rhs, dynamics.V_rhs, dynamics.U_rhsAB, dynamics.V_rhsAB = compute_vel_rhs_opt_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.U_rhsAB, dynamics.V_rhsAB, dynamics.eta_n, dynamics.AB_order, mesh.elem_area, mesh.gradient_sca, mesh.coriolis, mesh.ulevels, mesh.nlevels, mesh.elem2D, partit.myDim_elem2D, g, dt)
 t2 = time.time()
-if (partit.mype) == 0: print("compute rhs without @jit          :", t2 - t1)
 
-print(jnp.shape(mesh.gradient_sca), jnp.shape(dynamics.eta_n[mesh.elem2D]))
-Fx = jnp.sum(mesh.gradient_sca[:3, :] * dynamics.eta_n[mesh.elem2D], axis=0)
-Fy = jnp.sum(mesh.gradient_sca[3:, :] * dynamics.eta_n[mesh.elem2D], axis=0)
-compute_vel_rhs_opt3_jit(dynamics.uv, dynamics.UV_rhs, dynamics.UV_rhsAB, dynamics.eta_n, dynamics.AB_order, mesh.elem_area, mesh.gradient_sca, mesh.coriolis, mesh.ulevels, mesh.nlevels, mesh.elem2D, partit.myDim_elem2D, g, dt)
-
-from jax import profiler
+if (partit.mype==0):
+    print("runtime for compute_vel_rhs_opt_jit:", t2 - t1)
 t1 = time.time()
-# Profiling block
-with profiler.trace("/home/dsidoren/FESOM3/jax_profile"):
-    compute_vel_rhs_opt3_jit(dynamics.uv, dynamics.UV_rhs, dynamics.UV_rhsAB, dynamics.eta_n, dynamics.AB_order, mesh.elem_area, mesh.gradient_sca, mesh.coriolis, mesh.ulevels, mesh.nlevels, mesh.elem2D, partit.myDim_elem2D, g, dt)
-t2 = time.time()
-if (partit.mype) == 0: print("compute rhs @jit second call      :", t2 - t1)
 
-#call it first time (will be long since needs be compiled)
-t1 = time.time()
-ssh_rhs, minval, maxval, sumval = test_divergence2(mype=partit.mype, myDim_edge2D = partit.myDim_edge2D,
-    eDim_edge2D = partit.eDim_edge2D, myDim_elem2D = partit.myDim_elem2D, eDim_elem2D = partit.eDim_elem2D,
-    eXDim_elem2D = partit.eXDim_elem2D, myDim_nod2D = partit.myDim_nod2D, eDim_nod2D = partit.eDim_nod2D,
-    elem2D=mesh.elem2D, coord_nod2D=mesh.coord_nod2D, edges=mesh.edges, edge_tri=mesh.edge_tri, edge_cross_dxdy=mesh.edge_cross_dxdy,
-    cyclic_length=cyclic_length)
-t2 = time.time()
-if (partit.mype) == 0:
-    print(f"div_test: {partit.mype}, minval: {minval}, maxval: {maxval}, sum: {sumval}, time: {t2 - t1}")
+if partit.mype == 1:
+    print("U_rhs", U_rhs[:,8])
 
-#call it second time (shall be fast)
-t1 = time.time()
-for i in range(1000):
-    ssh_rhs, minval, maxval, sumval = test_divergence2(mype=partit.mype, myDim_edge2D = partit.myDim_edge2D,
-        eDim_edge2D = partit.eDim_edge2D, myDim_elem2D = partit.myDim_elem2D, eDim_elem2D = partit.eDim_elem2D,
-        eXDim_elem2D = partit.eXDim_elem2D, myDim_nod2D = partit.myDim_nod2D, eDim_nod2D = partit.eDim_nod2D,
-        elem2D=mesh.elem2D, coord_nod2D=mesh.coord_nod2D, edges=mesh.edges, edge_tri=mesh.edge_tri, edge_cross_dxdy=mesh.edge_cross_dxdy,
-        cyclic_length=cyclic_length)
+#dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c = visc_filt_bilapl_jit(partit,
+#    dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c,
+#    mesh.ulevels, mesh.nlevels, mesh.elem_area, mesh.edge_tri,
+#    dynamics.visc_gamma0, dynamics.visc_gamma1, dynamics.visc_gamma2,
+#    dt, partit.myDim_elem2D, partit.eDim_elem2D, partit.myDim_edge2D, partit.eDim_edge2D
+#)
+# Call the first function (JAX-compatible portion)
+
+dynamics.u = jnp.tile(
+    mesh.elem_cos[: partit.myDim_elem2D + partit.eDim_elem2D],
+    (mesh.nl - 1, 1)
+)
+dynamics.u_c, dynamics.v_c = visc_filt_bilapl_first_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c,
+                                    mesh.ulevels, mesh.nlevels, mesh.elem_area, mesh.edge_tri,
+                                    dynamics.visc_gamma0, dynamics.visc_gamma1, dynamics.visc_gamma2,
+                                    dt, partit.myDim_elem2D, partit.eDim_elem2D, partit.myDim_edge2D, partit.eDim_edge2D)
+dynamics.u_c = exchange_elem3D(dynamics.u_c, partit)  # needs to be taken out of jax
+dynamics.v_c = exchange_elem3D(dynamics.v_c, partit)  # needs to be taken out of jax
+# Call the second function (handles external function calls and completes computation)
+dynamics.U_rhs, dynamics.V_rhs, U_c, V_c = visc_filt_bilapl_second_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c,
+                                                 dynamics.v_c, mesh.ulevels, mesh.nlevels, mesh.elem_area, mesh.edge_tri,
+                                                 partit.myDim_edge2D, partit.eDim_edge2D)
 t2 = time.time()
-if (partit.mype) == 0:
-    print(f"div_test: {partit.mype}, minval: {minval}, maxval: {maxval}, sum: {sumval}, time: {t2 - t1}")
+if (partit.mype==0):
+    print("runtime for visc_filt_bilapl_jit:", t2 - t1)
+
+mesh.helem = exchange_elem3D(mesh.helem, partit)
+print(partit.mype,jnp.min(mesh.helem ), jnp.max(mesh.helem))
+
+
+if partit.mype == 1:
+    print("............................................................")
+    print("nlevels:", mesh.ulevels[8], mesh.nlevels[8])
+    print("helem:",   mesh.helem[:, 8])
+    print("zbar_e_bot:",   mesh.zbar_e_bot[8])
+    
+
+
+if partit.mype == 1:
+    print("U_rhs 1", dynamics.U_rhs[:,8])
+
+if partit.mype == 1:
+    print("U 1", dynamics.u[:,8])
+
+
+dynamics.U_rhs, dynamics.V_rhs = impl_vert_visc_ale_opt_jit(
+    dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.w_i,
+    stress_surf, dynamics.Av, mesh.elem_area, mesh.elem2D, mesh.ulevels, mesh.nlevels,
+    mesh.zbar_e_bot, mesh.helem, C_d, partit.myDim_elem2D, dt)
+
+
+if partit.mype == 1:
+    print("U_rhs 2", dynamics.U_rhs[:,8])
+print("U_rhs total sum 2:", partit.mype, jnp.sum(dynamics.U_rhs[:,:partit.myDim_elem2D]))
+
+if partit.mype == 1:
+    print(mesh.ulevels[8], mesh.nlevels[8])
 
 partit.MPI_COMM_FESOM.Barrier()
 MPI.Finalize()
