@@ -41,6 +41,7 @@ dt=1800.
 alpha=1.0
 theta=1.0
 do_read_mesh_ascii=False
+which_ALE = 'linfs'  # Default ALE scheme as in Fortran
 
 import pickle
 if do_read_mesh_ascii:
@@ -63,10 +64,15 @@ else:
     partit = load_data("partit", mype)
     partit.MPI_COMM_FESOM = MPI_COMM_FESOM
     mesh = load_data("mesh", mype)
+
 import time
 
 #mesh.helem = exchange_elem2D(mesh.helem, partit)
 from oce_dynamics import *
+
+mesh.helem = exchange_elem3D(mesh.helem, partit)
+mesh.areasvol = exchange_nod3D(mesh.areasvol, partit)
+print(partit.mype,jnp.min(mesh.helem ), jnp.max(mesh.helem))
 
 dynamics.eta_n = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
 dynamics.U_rhs = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
@@ -80,6 +86,9 @@ dynamics.v_c = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
 dynamics.w = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D))
 dynamics.w_i = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D))
 dynamics.eta_n = mesh.coord_nod2D[0,:]
+dynamics.water_flux = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
+dynamics.ssh_rhs = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
+dynamics.ssh_rhs_old = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
 
 stress_surf=jnp.zeros((2, partit.myDim_elem2D + partit.eDim_elem2D))
 dynamics.Av=jnp.zeros((mesh.nl, partit.myDim_elem2D + partit.eDim_elem2D))
@@ -95,7 +104,9 @@ print("after : ", arr.min(), arr.max())
 
 t1 = time.time()
 U_rhs, V_rhs, U_rhsAB, V_rhsAB = compute_vel_rhs_opt_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.U_rhsAB, dynamics.V_rhsAB, dynamics.eta_n, dynamics.AB_order, mesh.elem_area, mesh.gradient_sca, mesh.coriolis, mesh.ulevels, mesh.nlevels, mesh.elem2D, partit.myDim_elem2D, g, dt)
+
 t2 = time.time()
+
 if (partit.mype==0):
     print("compilation time for compute_vel_rhs_opt_jit:", t2 - t1)
 
@@ -103,18 +114,6 @@ if partit.mype == 1:
     print(mesh.nlevels[8])
 if partit.mype == 1:
     print("U_rhs", U_rhs[:,8])
-
-#t1 = time.time()
-#dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c = visc_filt_bilapl_jit(
-#    dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c,
-#    mesh.ulevels, mesh.nlevels, mesh.elem_area, mesh.edge_tri,
-#    dynamics.visc_gamma0, dynamics.visc_gamma1, dynamics.visc_gamma2,
-#    dt, partit.myDim_elem2D, partit.eDim_elem2D, partit.myDim_edge2D, partit.eDim_edge2D
-#)
-#t2 = time.time()
-#if (partit.mype==0):
-#    print("compilation time for visc_filt_bilapl_jit:", t2 - t1)
-
 
 t1 = time.time()
 for i in range (5):
@@ -125,16 +124,9 @@ if (partit.mype==0):
     print("runtime for compute_vel_rhs_opt_jit:", t2 - t1)
 t1 = time.time()
 
+
 if partit.mype == 1:
     print("U_rhs", U_rhs[:,8])
-
-#dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c = visc_filt_bilapl_jit(partit,
-#    dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c,
-#    mesh.ulevels, mesh.nlevels, mesh.elem_area, mesh.edge_tri,
-#    dynamics.visc_gamma0, dynamics.visc_gamma1, dynamics.visc_gamma2,
-#    dt, partit.myDim_elem2D, partit.eDim_elem2D, partit.myDim_edge2D, partit.eDim_edge2D
-#)
-# Call the first function (JAX-compatible portion)
 
 dynamics.u = jnp.tile(
     mesh.elem_cos[: partit.myDim_elem2D + partit.eDim_elem2D],
@@ -150,12 +142,12 @@ dynamics.v_c = exchange_elem3D(dynamics.v_c, partit)  # needs to be taken out of
 dynamics.U_rhs, dynamics.V_rhs, U_c, V_c = visc_filt_bilapl_second_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c,
                                                  dynamics.v_c, mesh.ulevels, mesh.nlevels, mesh.elem_area, mesh.edge_tri,
                                                  partit.myDim_edge2D, partit.eDim_edge2D)
+                                                 
 t2 = time.time()
+
+
 if (partit.mype==0):
     print("runtime for visc_filt_bilapl_jit:", t2 - t1)
-
-mesh.helem = exchange_elem3D(mesh.helem, partit)
-print(partit.mype,jnp.min(mesh.helem ), jnp.max(mesh.helem))
 
 
 if partit.mype == 1:
@@ -185,6 +177,28 @@ print("U_rhs total sum 2:", partit.mype, jnp.sum(dynamics.U_rhs[:,:partit.myDim_
 
 if partit.mype == 1:
     print(mesh.ulevels[8], mesh.nlevels[8])
+
+dynamics.ssh_rhs = compute_ssh_rhs_ale_jit(
+    dynamics.u, dynamics.v,  # U and V velocities
+    dynamics.U_rhs, dynamics.V_rhs,  # RHS terms
+    dynamics.ssh_rhs, dynamics.ssh_rhs_old,  # SSH terms
+    dynamics.water_flux, alpha,  # Water flux and alpha parameter
+    mesh.edges, mesh.edge_tri, mesh.edge_cross_dxdy,  # Mesh geometry
+    mesh.ulevels, mesh.nlevels, mesh.helem, mesh.areasvol,  # Level and area info
+    partit.myDim_nod2D, partit.myDim_edge2D,  # Partition info
+    which_ALE  # ALE configuration
+)
+
+dynamics.ssh_rhs = exchange_nod2D(dynamics.ssh_rhs, partit)
+
+
+
+print("ssh_rhs_sum=", partit.mype, jnp.sum(dynamics.ssh_rhs))
+#print("edge_cross_dxdy=", partit.mype, jnp.sum(mesh.edge_cross_dxdy[2,:]))
+
+#print(jnp.min(mesh.edges[0,:]), jnp.min(mesh.edges[1, :]))
+#print(jnp.min(mesh.edge_tri[0,:]), jnp.min(mesh.edge_tri[1, :]))
+#print(partit.mype, partit.myDim_nod2D, partit.myDim_edge2D)
 
 partit.MPI_COMM_FESOM.Barrier()
 MPI.Finalize()

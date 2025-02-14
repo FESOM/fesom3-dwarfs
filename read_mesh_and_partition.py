@@ -1300,7 +1300,7 @@ def mesh_auxiliary_arrays(mesh, partit, cartesian, fplane, cyclic_length, r_eart
         mesh.edge_cross_dxdy = mesh.edge_cross_dxdy.at[0:2, n].set(b * r_earth)
         if ((n==0) & (mype==0)):
             print("edgecheck", a, mesh.edge_cross_dxdy[0:2, n])
-        if el[1] > 0:
+        if el[1] >= 0:
             b = jnp.array([center_x[el[1]], center_y[el[1]]]) - jnp.array(a)
             b = b.at[0].set(trim_cyclic(b[0], cyclic_length))
             b = b.at[0].set(b[0] * mesh.elem_cos[el[1]])

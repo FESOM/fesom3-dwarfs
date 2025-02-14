@@ -557,3 +557,91 @@ def impl_vert_visc_ale_opt_jit(U, V, U_rhs, V_rhs, Wvel_i, stress_surf, Av, elem
     state = lax.fori_loop(0, myDim_elem2D, process_element, state)
     U_rhs, V_rhs = state
     return U_rhs, V_rhs
+
+def compute_ssh_rhs_ale(u, v, u_rhs, v_rhs, ssh_rhs, ssh_rhs_old, water_flux, alpha, edges, edge_tri, edge_cross_dxdy,
+                       ulevels, nlevels, helem, areasvol, myDim_nod2D, myDim_edge2D, which_ALE):
+    # Initialize ssh_rhs to zero
+    ssh_rhs = ssh_rhs.at[:].set(0.0)
+
+    def process_edge(ed, ssh_rhs):
+        # Get nodes and elements for this edge
+        enodes = edges[:, ed]
+        el = edge_tri[:, ed]
+        
+        # Calculate depth integral for el[0]
+        c1 = 0.0
+        deltaX1 = edge_cross_dxdy[0, ed]
+        deltaY1 = edge_cross_dxdy[1, ed]
+        
+        nzmin = ulevels[el[0]] - 1  # Convert from Fortran to Python 0-based indexing
+        nzmax = nlevels[el[0]] - 1  # Match Fortran's nzmax = nlevels(el(1))-1
+        
+        def integrate_flux_el1(nz, c1):
+            # Compute flux contribution for element 1
+            # Note: In Fortran UV(1,:,:) is U and UV(2,:,:) is V
+            flux = alpha * ((v[nz, el[0]] + v_rhs[nz, el[0]]) * deltaX1 - 
+                          (u[nz, el[0]] + u_rhs[nz, el[0]]) * deltaY1) * helem[nz, el[0]]
+            return c1 + flux
+
+        c1 = lax.fori_loop(nzmin, nzmax + 1, integrate_flux_el1, c1)  # +1 to match Fortran inclusive range
+        
+        # Calculate depth integral for el[1] if it exists
+        c2 = 0.0
+        def integrate_flux_el2(nz, c2):
+            deltaX2 = edge_cross_dxdy[2, ed]
+            deltaY2 = edge_cross_dxdy[3, ed]
+            # Compute flux contribution for element 2
+            flux = -alpha * ((v[nz, el[1]] + v_rhs[nz, el[1]]) * deltaX2 - 
+                           (u[nz, el[1]] + u_rhs[nz, el[1]]) * deltaY2) * helem[nz, el[1]]
+            return c2 + flux
+
+        # Only compute for el[1] if it exists (>= 0)
+        c2 = lax.cond(el[1] >=0,
+                     lambda x: lax.fori_loop(ulevels[el[1]] - 1, nlevels[el[1]], integrate_flux_el2, x),
+                     lambda x: x,
+                     c2)
+
+        # Update ssh_rhs for both nodes
+        ssh_rhs = ssh_rhs.at[enodes[0]].add(c1 + c2)
+        ssh_rhs = ssh_rhs.at[enodes[1]].add(-(c1 + c2))
+        
+        return ssh_rhs
+
+    # Process all edges
+    ssh_rhs = lax.fori_loop(0, myDim_edge2D, process_edge, ssh_rhs)
+
+    # Handle water flux boundary conditions
+    def process_node(n, ssh_rhs):
+        nzmin = ulevels[n] - 1  # Convert from Fortran to Python 0-based indexing
+        
+        # Add water flux and old rhs at surface if not using linfs scheme
+        def handle_surface(ssh_rhs):
+            ssh_rhs = ssh_rhs.at[n].add(
+                -alpha * water_flux[n] * areasvol[nzmin, n] + 
+                (1.0 - alpha) * ssh_rhs_old[n]
+            )
+            return ssh_rhs
+        
+        # Skip cavity points if which_ALE is 'linfs'
+        def handle_linfs(ssh_rhs):
+            ssh_rhs = lax.cond(ulevels[n] == 1,
+                             lambda x: x.at[n].add((1.0 - alpha) * ssh_rhs_old[n]),
+                             lambda x: x,
+                             ssh_rhs)
+            return ssh_rhs
+        
+        # Apply appropriate water flux handling based on ALE scheme
+        ssh_rhs = lax.cond(which_ALE == 'linfs',
+                          lambda x: handle_linfs(x),
+                          lambda x: handle_surface(x),
+                          ssh_rhs)
+        
+        return ssh_rhs
+
+    # Process water flux for all nodes
+    ssh_rhs = lax.fori_loop(0, myDim_nod2D, process_node, ssh_rhs)
+    # MPI exchange to synchronize ssh_rhs across ranks
+    # Note: This is handled by the caller in read_mesh_jax.py
+    
+    return ssh_rhs
+compute_ssh_rhs_ale_jit = jax.jit(compute_ssh_rhs_ale, static_argnames=['which_ALE'])
