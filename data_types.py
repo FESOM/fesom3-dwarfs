@@ -112,6 +112,7 @@ class Dynamics:
     ssh_rhs_old: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
     eta_n: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
     deta_n: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
+    d_eta: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
     w: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
     w_i: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
     U_rhs   : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
@@ -122,7 +123,26 @@ class Dynamics:
     v       : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
     u_c     : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
     v_c     : jnp.ndarray = field(default_factory=lambda: jnp.zeros((0, 0)))
+    water_flux: jnp.ndarray = field(default_factory=lambda: jnp.zeros(0))
     visc_gamma0 : float = 1.0
     visc_gamma1 : float = 1.0
     visc_gamma2 : float = 1.0
     AB_order: int = 2
+
+@dataclass
+class SolverInfo:
+    def __init__(self, myDim_nod2D, eDim_nod2D):
+        self.ident = 1
+        self.maxiter = 2000
+        self.restart = 15
+        self.fillin = 3
+        self.lutype = 2
+        self.droptol = 1.e-8
+        self.soltol = 1e-5
+        
+        # Initialize arrays with zeros
+        total_size = myDim_nod2D + eDim_nod2D
+        self.rr = jnp.zeros(total_size)
+        self.zz = jnp.zeros(total_size)
+        self.pp = jnp.zeros(total_size)
+        self.App = jnp.zeros(total_size)

@@ -8,7 +8,7 @@ from jax import random
 from jax import ops
 from array_interfaces import array_factory, JaxStyleNumpyArray
 import numpy as np
-from data_types import Mesh, Partitioning, Dynamics
+from data_types import Mesh, Partitioning, Dynamics, SolverInfo
 from read_write_mesh_binary import *
 force_rotation = True
 
@@ -199,6 +199,15 @@ print("ssh_rhs_sum=", partit.mype, jnp.sum(dynamics.ssh_rhs))
 #print(jnp.min(mesh.edges[0,:]), jnp.min(mesh.edges[1, :]))
 #print(jnp.min(mesh.edge_tri[0,:]), jnp.min(mesh.edge_tri[1, :]))
 #print(partit.mype, partit.myDim_nod2D, partit.myDim_edge2D)
+
+# Initialize preconditioner
+solverinfo = SolverInfo(partit.myDim_nod2D, partit.eDim_nod2D)
+rr, zz, pp, App = ssh_solve_preconditioner_jit(solverinfo, partit, mesh)
+
+# Initialize and solve SSH equation
+dynamics.d_eta = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
+dynamics.d_eta = ssh_solve_cg_jit(dynamics.ssh_rhs, dynamics.d_eta, solverinfo, mesh, partit)
+print("d_eta_sum=", partit.mype, jnp.sum(dynamics.d_eta))
 
 partit.MPI_COMM_FESOM.Barrier()
 MPI.Finalize()

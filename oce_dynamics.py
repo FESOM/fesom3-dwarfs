@@ -1,10 +1,10 @@
 import jax
 import jax.numpy as jnp
-from jax import lax
+from jax import jit, lax
+from functools import partial
 from mpi4py import MPI
 #from mpi4jax import send, recv, bcast
 from module_rotate_grid import *
-from jax import jit
 from read_mesh_and_partition import *
 from jax import debug
 
@@ -645,3 +645,169 @@ def compute_ssh_rhs_ale(u, v, u_rhs, v_rhs, ssh_rhs, ssh_rhs_old, water_flux, al
     
     return ssh_rhs
 compute_ssh_rhs_ale_jit = jax.jit(compute_ssh_rhs_ale, static_argnames=['which_ALE'])
+
+def ssh_solve_preconditioner_jit(solverinfo, partit, mesh):
+    """
+    Preconditioner follows MITgcm (JGR, 102,5753-5766, 1997)
+    If the row r of the ssh equation is a_r eta_r +\sum a_i\eta_i=rhs_row_r
+    where summation is over all nodes neighboring node r,
+    the inverse of the preconditioner matrix has the coefficients
+    1/a_r, .... -2*a_i/a_r/(a_r+(a_diag)_i) ....
+    Here (a_diag)_i is the diagonal value in row i of the ssh matrix.
+    """
+    # Get local variables
+    myDim_nod2D = partit.myDim_nod2D
+    eDim_nod2D = partit.eDim_nod2D
+    
+    # Get stiffness matrix info
+    stiff_values = mesh.ssh_stiff.values
+    stiff_colind = mesh.ssh_stiff.colind_loc
+    stiff_rowptr = mesh.ssh_stiff.rowptr_loc
+    
+    # Set solver parameters if not set
+    if not hasattr(solverinfo, 'max_iter'):
+        solverinfo.max_iter = 1000
+    if not hasattr(solverinfo, 'soltol'):
+        solverinfo.soltol = 1.e-5  # Match Fortran tolerance
+    
+    # Calculate nend (size of pr_values array)
+    nend = stiff_rowptr[myDim_nod2D] - stiff_rowptr[0]
+    
+    # Initialize arrays
+    pr_values = jnp.zeros(nend)
+    diag_values = jnp.zeros(myDim_nod2D + eDim_nod2D)
+    
+    # Get diagonal values
+    for row in range(myDim_nod2D):
+        offset = stiff_rowptr[row] - stiff_rowptr[0]
+        diag_values = diag_values.at[row].set(stiff_values[offset])
+    
+    # Exchange diagonal values across processes
+    diag_values = exchange_nod2D(diag_values, partit)
+    
+    # Fill in the preconditioner
+    for row in range(myDim_nod2D):
+        offset = stiff_rowptr[row] - stiff_rowptr[0]
+        nend = stiff_rowptr[row + 1] - stiff_rowptr[row]
+        
+        # Diagonal element
+        pr_values = pr_values.at[offset].set(1.0 / stiff_values[offset])
+        # Off-diagonal elements
+        for n in range(1, nend):
+            node = stiff_colind[offset + n]
+            pr_values = pr_values.at[n + offset].set(
+                -0.5 * (stiff_values[n + offset] / stiff_values[offset]) /
+                (stiff_values[offset] + diag_values[node])
+            )
+
+    # Store the preconditioner values
+    mesh.ssh_stiff.pr_values = pr_values
+    
+    # Initialize solver arrays
+    n = myDim_nod2D + eDim_nod2D
+    if solverinfo.rr is None or len(solverinfo.rr) != n:
+        solverinfo.rr = jnp.zeros(n)
+    if solverinfo.zz is None or len(solverinfo.zz) != n:
+        solverinfo.zz = jnp.zeros(n)
+    if solverinfo.pp is None or len(solverinfo.pp) != n:
+        solverinfo.pp = jnp.zeros(n)
+    if solverinfo.App is None or len(solverinfo.App) != n:
+        solverinfo.App = jnp.zeros(n)
+    
+    return solverinfo.rr, solverinfo.zz, solverinfo.pp, solverinfo.App
+
+def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
+    """Conjugate gradient solver for the SSH equation
+    
+    This implementation follows the Fortran version exactly.
+    The matrix is symmetric because we compute divergence contributions as
+    integrated over area of scalar control volume.
+    """
+    # Create aliases for frequently used variables
+    myDim_nod2D = partit.myDim_nod2D
+    eDim_nod2D = partit.eDim_nod2D
+    npes = partit.npes
+    mype = partit.mype
+    nod2D = mesh.nod2D  # Total number of nodes
+    stiff_values = mesh.ssh_stiff.values
+    stiff_colind = mesh.ssh_stiff.colind_loc
+    stiff_rowptr = mesh.ssh_stiff.rowptr_loc
+    pr_values = mesh.ssh_stiff.pr_values
+    
+    # Create local aliases for shorter code
+    rr = solverinfo.rr
+    zz = solverinfo.zz
+    pp = solverinfo.pp
+    App = solverinfo.App
+    max_iter = solverinfo.max_iter
+    soltol = solverinfo.soltol
+    
+    # Compute initial residual r0 = b - Ax
+    for row in range(myDim_nod2D):
+        start, end = stiff_rowptr[row], stiff_rowptr[row+1]
+        r = rhs[row] - jnp.sum(stiff_values[start:end] * x[stiff_colind[start:end]])
+        rr = rr.at[row].set(r)
+    
+    # Exchange initial residual
+    rr = exchange_nod2D(rr, partit)
+    
+    # Apply preconditioner M^-1 r -> z and set initial p
+    for row in range(myDim_nod2D):
+        start, end = stiff_rowptr[row], stiff_rowptr[row+1]
+        z = jnp.sum(pr_values[start:end] * rr[stiff_colind[start:end]])
+        zz = zz.at[row].set(z)
+        pp = pp.at[row].set(z)  # Initial p = z
+        
+    # Compute initial r·z
+    s_old = MPI.COMM_WORLD.allreduce(jnp.sum(rr[:myDim_nod2D] * zz[:myDim_nod2D]), op=MPI.SUM)
+    
+    # Main CG iteration loop
+    for iter in range(max_iter):
+        # Compute residual norm
+        rr_norm = MPI.COMM_WORLD.allreduce(jnp.sum(rr[:myDim_nod2D] * rr[:myDim_nod2D]), op=MPI.SUM)
+        rel_res = jnp.sqrt(rr_norm/nod2D)
+        print("solver: ", partit.mype, iter+1, 0.0 if iter == 0 else rel_res)
+        
+        # Check convergence
+        if rel_res < soltol:
+            break
+        
+        # Exchange pp before matrix-vector multiplication
+        pp = exchange_nod2D(pp, partit)
+        
+        # Compute Ap
+        for row in range(myDim_nod2D):
+            start, end = stiff_rowptr[row], stiff_rowptr[row+1]
+            ap = jnp.sum(stiff_values[start:end] * pp[stiff_colind[start:end]])
+            App = App.at[row].set(ap)
+        
+        # Compute alpha = (r·z)/(p·Ap)
+        pAp = MPI.COMM_WORLD.allreduce(jnp.sum(pp[:myDim_nod2D] * App[:myDim_nod2D]), op=MPI.SUM)
+        alpha = s_old / pAp
+        
+        # Update solution and residual
+        for row in range(myDim_nod2D):
+            x = x.at[row].add(alpha * pp[row])
+            rr = rr.at[row].add(-alpha * App[row])
+        
+        # Exchange residual before applying preconditioner
+        rr = exchange_nod2D(rr, partit)
+        
+        # Apply preconditioner M^-1 r -> z
+        for row in range(myDim_nod2D):
+            start, end = stiff_rowptr[row], stiff_rowptr[row+1]
+            z = jnp.sum(pr_values[start:end] * rr[stiff_colind[start:end]])
+            zz = zz.at[row].set(z)
+        
+        # Compute r·z for beta
+        rz = MPI.COMM_WORLD.allreduce(jnp.sum(rr[:myDim_nod2D] * zz[:myDim_nod2D]), op=MPI.SUM)
+        beta = rz / s_old
+        s_old = rz
+        
+        # Update search direction
+        for row in range(myDim_nod2D):
+            pp = pp.at[row].set(zz[row] + beta * pp[row])
+    
+    # Final exchange of solution
+    x = exchange_nod2D(x, partit)
+    return x
