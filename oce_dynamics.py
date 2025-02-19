@@ -558,6 +558,17 @@ def impl_vert_visc_ale_opt_jit(U, V, U_rhs, V_rhs, Wvel_i, stress_surf, Av, elem
     U_rhs, V_rhs = state
     return U_rhs, V_rhs
 
+@partial(jit, static_argnums=(4,))
+def sparse_matvec(values, colind, rowptr, x, myDim_nod2D):
+    """JAX-compiled sparse matrix-vector multiplication using scan"""
+    def row_dot(row):
+        def body_fun(i, carry):
+            return carry + values[i] * x[colind[i]]
+        start, end = rowptr[row], rowptr[row + 1]
+        return lax.fori_loop(start, end, body_fun, 0.0)
+    
+    return jax.vmap(row_dot)(jnp.arange(myDim_nod2D))
+
 def compute_ssh_rhs_ale(u, v, u_rhs, v_rhs, ssh_rhs, ssh_rhs_old, water_flux, alpha, edges, edge_tri, edge_cross_dxdy,
                        ulevels, nlevels, helem, areasvol, myDim_nod2D, myDim_edge2D, which_ALE):
     # Initialize ssh_rhs to zero
@@ -743,21 +754,16 @@ def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
     soltol = solverinfo.soltol
     
     # Compute initial residual r0 = b - Ax
-    for row in range(myDim_nod2D):
-        start, end = stiff_rowptr[row], stiff_rowptr[row+1]
-        r = rhs[row] - jnp.sum(stiff_values[start:end] * x[stiff_colind[start:end]])
-        rr = rr.at[row].set(r)
+    rr = rr.at[:myDim_nod2D].set(rhs[:myDim_nod2D] - sparse_matvec(stiff_values, stiff_colind, stiff_rowptr, x, myDim_nod2D))
     
     # Exchange initial residual
     rr = exchange_nod2D(rr, partit)
     
     # Apply preconditioner M^-1 r -> z and set initial p
-    for row in range(myDim_nod2D):
-        start, end = stiff_rowptr[row], stiff_rowptr[row+1]
-        z = jnp.sum(pr_values[start:end] * rr[stiff_colind[start:end]])
-        zz = zz.at[row].set(z)
-        pp = pp.at[row].set(z)  # Initial p = z
-        
+    z_values = sparse_matvec(pr_values, stiff_colind, stiff_rowptr, rr, myDim_nod2D)
+    zz = zz.at[:myDim_nod2D].set(z_values)
+    pp = pp.at[:myDim_nod2D].set(z_values)
+    
     # Compute initial r·z
     s_old = MPI.COMM_WORLD.allreduce(jnp.sum(rr[:myDim_nod2D] * zz[:myDim_nod2D]), op=MPI.SUM)
     
@@ -775,29 +781,22 @@ def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
         # Exchange pp before matrix-vector multiplication
         pp = exchange_nod2D(pp, partit)
         
-        # Compute Ap
-        for row in range(myDim_nod2D):
-            start, end = stiff_rowptr[row], stiff_rowptr[row+1]
-            ap = jnp.sum(stiff_values[start:end] * pp[stiff_colind[start:end]])
-            App = App.at[row].set(ap)
+        # Compute Ap using sparse matrix-vector product
+        App = App.at[:myDim_nod2D].set(sparse_matvec(stiff_values, stiff_colind, stiff_rowptr, pp, myDim_nod2D))
         
         # Compute alpha = (r·z)/(p·Ap)
         pAp = MPI.COMM_WORLD.allreduce(jnp.sum(pp[:myDim_nod2D] * App[:myDim_nod2D]), op=MPI.SUM)
         alpha = s_old / pAp
         
         # Update solution and residual
-        for row in range(myDim_nod2D):
-            x = x.at[row].add(alpha * pp[row])
-            rr = rr.at[row].add(-alpha * App[row])
+        x = x.at[:myDim_nod2D].add(alpha * pp[:myDim_nod2D])
+        rr = rr.at[:myDim_nod2D].add(-alpha * App[:myDim_nod2D])
         
         # Exchange residual before applying preconditioner
         rr = exchange_nod2D(rr, partit)
         
         # Apply preconditioner M^-1 r -> z
-        for row in range(myDim_nod2D):
-            start, end = stiff_rowptr[row], stiff_rowptr[row+1]
-            z = jnp.sum(pr_values[start:end] * rr[stiff_colind[start:end]])
-            zz = zz.at[row].set(z)
+        zz = zz.at[:myDim_nod2D].set(sparse_matvec(pr_values, stiff_colind, stiff_rowptr, rr, myDim_nod2D))
         
         # Compute r·z for beta
         rz = MPI.COMM_WORLD.allreduce(jnp.sum(rr[:myDim_nod2D] * zz[:myDim_nod2D]), op=MPI.SUM)
@@ -805,8 +804,7 @@ def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
         s_old = rz
         
         # Update search direction
-        for row in range(myDim_nod2D):
-            pp = pp.at[row].set(zz[row] + beta * pp[row])
+        pp = pp.at[:myDim_nod2D].set(zz[:myDim_nod2D] + beta * pp[:myDim_nod2D])
     
     # Final exchange of solution
     x = exchange_nod2D(x, partit)
