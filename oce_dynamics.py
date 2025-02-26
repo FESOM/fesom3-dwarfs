@@ -753,6 +753,9 @@ def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
     max_iter = solverinfo.max_iter
     soltol = solverinfo.soltol
     
+    # Compute initial r·z
+    s_old = MPI.COMM_WORLD.allreduce(jnp.sum(rhs[:myDim_nod2D] * rhs[:myDim_nod2D]), op=MPI.SUM)
+    rtol=solverinfo.soltol*jnp.sqrt(s_old/mesh.nod2D)
     # Compute initial residual r0 = b - Ax
     rr = rr.at[:myDim_nod2D].set(rhs[:myDim_nod2D] - sparse_matvec(stiff_values, stiff_colind, stiff_rowptr, x, myDim_nod2D))
     
@@ -767,17 +770,12 @@ def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
     # Compute initial r·z
     s_old = MPI.COMM_WORLD.allreduce(jnp.sum(rr[:myDim_nod2D] * zz[:myDim_nod2D]), op=MPI.SUM)
     
+    rel_res=0.0
     # Main CG iteration loop
     for iter in range(max_iter):
-        # Compute residual norm
-        rr_norm = MPI.COMM_WORLD.allreduce(jnp.sum(rr[:myDim_nod2D] * rr[:myDim_nod2D]), op=MPI.SUM)
-        rel_res = jnp.sqrt(rr_norm/nod2D)
-        print("solver: ", partit.mype, iter+1, 0.0 if iter == 0 else rel_res)
-        
-        # Check convergence
-        if rel_res < soltol:
-            break
-        
+
+        print("solver: ", partit.mype, iter+1, rel_res)
+               
         # Exchange pp before matrix-vector multiplication
         pp = exchange_nod2D(pp, partit)
         
@@ -798,6 +796,15 @@ def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
         # Apply preconditioner M^-1 r -> z
         zz = zz.at[:myDim_nod2D].set(sparse_matvec(pr_values, stiff_colind, stiff_rowptr, rr, myDim_nod2D))
         
+
+        # Compute residual norm
+        rr_norm = MPI.COMM_WORLD.allreduce(jnp.sum(rr[:myDim_nod2D] * rr[:myDim_nod2D]), op=MPI.SUM)
+        rel_res = jnp.sqrt(rr_norm/nod2D)
+
+        # Check convergence
+        if rel_res < rtol:
+            break
+
         # Compute r·z for beta
         rz = MPI.COMM_WORLD.allreduce(jnp.sum(rr[:myDim_nod2D] * zz[:myDim_nod2D]), op=MPI.SUM)
         beta = rz / s_old
