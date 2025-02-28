@@ -9,8 +9,9 @@ from read_mesh_and_partition import *
 from jax import debug
 
 def compute_vel_rhs_opt(U, V, U_rhs, V_rhs, U_rhsAB, V_rhsAB, eta_n, AB_order, elem_area, gradient_sca, coriolis, ulevels, nlevels, elem2D, myDim_elem2D, g, dt):
+    eps = 1.e-1  # Small value for AB 2nd order offset
     ab_coefficients = {
-        2: (-0.5, 1.5, 0.0),
+        2: (-(0.5+eps), (1.5+eps), 0.0),
         3: (5.0 / 12.0, -16.0 / 12.0, 23.0 / 12.0)
     }
 
@@ -878,9 +879,9 @@ def update_vel_jit(U, V, U_rhs, V_rhs, d_eta, elem2D_nodes, gradient_sca, ulevel
     
     return U_final, V_final
 
-@partial(jax.jit, static_argnums=(13, 14, 15, 16))
+@partial(jax.jit, static_argnums=(14, 15, 16, 17))
 def compute_hbar_ale_jit(u, v, water_flux, helem, edges, edge_tri, edge_cross_dxdy, 
-                        elem2D, ulevels, ulevels_nod2D, nlevels, area, hbar_old,
+                        elem2D, ulevels, ulevels_nod2D, nlevels, area, hbar_old, hbar,
                         myDim_nod2D, eDim_nod2D, myDim_edge2D, myDim_elem2D, dt, ssh_rhs_old):
     """Compute hbar for ALE (Arbitrary Lagrangian-Eulerian) formulation.
     Ported from oce_ale.F90:compute_hbar_ale.
@@ -938,7 +939,7 @@ def compute_hbar_ale_jit(u, v, water_flux, helem, edges, edge_tri, edge_cross_dx
     # ssh_rhs_old = jax.lax.fori_loop(0, myDim_nod2D, lambda i, val: apply_water_flux(i, val), ssh_rhs_old)
     
     # Update thickness
-    hbar = jnp.copy(hbar_old)
+    hbar_old = jnp.copy(hbar)
     
     def update_hbar(n, hbar):
         nzmin = ulevels_nod2D[n]-1
@@ -946,7 +947,7 @@ def compute_hbar_ale_jit(u, v, water_flux, helem, edges, edge_tri, edge_cross_dx
     
     hbar = jax.lax.fori_loop(0, myDim_nod2D, lambda i, val: update_hbar(i, val), hbar)
     
-    return hbar, ssh_rhs_old
+    return hbar_old, hbar, ssh_rhs_old
 
 @partial(jax.jit, static_argnums=(3,))
 def compute_dhe_ale_jit(dhe, hbar, hbar_old, myDim_elem2D, elem2D, ulevels):

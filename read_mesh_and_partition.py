@@ -1142,7 +1142,7 @@ def mesh_areas(mesh, partit, cartesian, cyclic_length, r_earth):
     for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
         for j in range(mesh.nod_in_elem2D_num[n]):
             elem = mesh.nod_in_elem2D[j, n]
-            nzmin = mesh.ulevels[elem]
+            nzmin = mesh.ulevels[elem]-1
             nzmax = mesh.nlevels[elem] - 1
             for nz in range(nzmin, nzmax + 1):
                 mesh.area = mesh.area.at[nz, n].set(mesh.area[nz, n] + mesh.elem_area[elem] / 3.0)
@@ -1153,8 +1153,8 @@ def mesh_areas(mesh, partit, cartesian, cyclic_length, r_earth):
     mesh.area *= r_earth * r_earth
     mesh.areasvol *= r_earth * r_earth
     # Exchange nodal areas
-#    mesh.area     = exchange_nod3D(mesh.area,     partit)
-#    mesh.areasvol = exchange_nod3D(mesh.areasvol, partit)
+    mesh.area     = exchange_nod3D(mesh.area,     partit)
+    mesh.areasvol = exchange_nod3D(mesh.areasvol, partit)
     if (mype==0):
         n=partit.myDim_nod2D-1
         for j in range(mesh.nod_in_elem2D_num[n]):
@@ -1165,7 +1165,7 @@ def mesh_areas(mesh, partit, cartesian, cyclic_length, r_earth):
 
     # Compute inverse area
     for n in range(partit.myDim_nod2D + partit.eDim_nod2D):
-        nzmin = mesh.ulevels_nod2D[n]
+        nzmin = mesh.ulevels_nod2D[n]-1
         nzmax = mesh.nlevels_nod2D[n]
         for nz in range(nzmin, nzmax + 1):
             mesh.area_inv = mesh.area_inv.at[nz, n].set(1.0 / mesh.area[nz, n] if mesh.area[nz, n] > 0.0 else 0.0)
@@ -1197,9 +1197,9 @@ def mesh_areas(mesh, partit, cartesian, cyclic_length, r_earth):
     vol2 = 0.0
     print("1st level:", mesh.ulevels_nod2D.min(), mesh.ulevels_nod2D.max())
     for n in range(partit.myDim_nod2D):
-        vol2 += mesh.areasvol[mesh.ulevels_nod2D[n], n]
+        vol2 += mesh.areasvol[mesh.ulevels_nod2D[n]-1, n]
         if mesh.ulevels_nod2D[n] == 1:
-            vol += mesh.areasvol[1, n]
+            vol += mesh.areasvol[0, n]
 
     mesh.ocean_area = comm.allreduce(vol, op=MPI.SUM)
     mesh.ocean_areawithcav = comm.allreduce(vol2, op=MPI.SUM)
@@ -1233,7 +1233,7 @@ def mesh_auxiliary_arrays(mesh, partit, cartesian, fplane, cyclic_length, r_eart
     eXDim_elem2D = partit.eXDim_elem2D
     myDim_nod2D = partit.myDim_nod2D
     eDim_nod2D = partit.eDim_nod2D
-    omega = 7.2921e-5  # Earth's rotation rate
+    omega = 2.*jnp.pi/(3600.*24.)
 
     # Allocate arrays with JAX
     mesh.edge_dxdy = jnp.zeros((2, myDim_edge2D + eDim_edge2D))

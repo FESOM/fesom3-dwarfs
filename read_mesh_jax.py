@@ -92,93 +92,42 @@ dynamics.ssh_rhs_old = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
 
 stress_surf=jnp.zeros((2, partit.myDim_elem2D + partit.eDim_elem2D))
 dynamics.Av=jnp.zeros((mesh.nl, partit.myDim_elem2D + partit.eDim_elem2D))
-dynamics.Av = dynamics.Av.at[:,:].set(1.)
-stress_surf = stress_surf.at[:,:].set(1.)
-C_d=1.0#1.e-3
-
-arr = jnp.zeros((mesh.nl-1, partit.myDim_elem2D + partit.eDim_elem2D))
-arr = arr.at[:, :partit.myDim_elem2D].set(1)
-print("before: ", arr.min(), arr.max())
-arr=exchange_elem3D(arr, partit)
-print("after : ", arr.min(), arr.max())
+dynamics.Av = dynamics.Av.at[:,:].set(1.e-3)
+stress_surf = stress_surf.at[:,:].set(1.e-3)
+C_d=1.e-3
+solverinfo = SolverInfo(partit.myDim_nod2D, partit.eDim_nod2D)
+rr, zz, pp, App = ssh_solve_preconditioner_jit(solverinfo, partit, mesh)
 
 t1 = time.time()
-U_rhs, V_rhs, U_rhsAB, V_rhsAB = compute_vel_rhs_opt_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.U_rhsAB, dynamics.V_rhsAB, dynamics.eta_n, dynamics.AB_order, mesh.elem_area, mesh.gradient_sca, mesh.coriolis, mesh.ulevels, mesh.nlevels, mesh.elem2D, partit.myDim_elem2D, g, dt)
+dynamics.d_eta = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
+print(partit.mype, jnp.sum(mesh.coriolis))
+for TIMESTEP in range(2):
 
-t2 = time.time()
-
-if (partit.mype==0):
-    print("compilation time for compute_vel_rhs_opt_jit:", t2 - t1)
-
-if partit.mype == 1:
-    print(mesh.nlevels[8])
-if partit.mype == 1:
-    print("U_rhs", U_rhs[:,8])
-
-t1 = time.time()
-for i in range (5):
     dynamics.U_rhs, dynamics.V_rhs, dynamics.U_rhsAB, dynamics.V_rhsAB = compute_vel_rhs_opt_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.U_rhsAB, dynamics.V_rhsAB, dynamics.eta_n, dynamics.AB_order, mesh.elem_area, mesh.gradient_sca, mesh.coriolis, mesh.ulevels, mesh.nlevels, mesh.elem2D, partit.myDim_elem2D, g, dt)
-t2 = time.time()
-
-if (partit.mype==0):
-    print("runtime for compute_vel_rhs_opt_jit:", t2 - t1)
-t1 = time.time()
 
 
-if partit.mype == 1:
-    print("U_rhs", U_rhs[:,8])
-
-dynamics.u = jnp.tile(
-    mesh.elem_cos[: partit.myDim_elem2D + partit.eDim_elem2D],
-    (mesh.nl - 1, 1)
-)
-dynamics.u_c, dynamics.v_c = visc_filt_bilapl_first_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c,
-                                    mesh.ulevels, mesh.nlevels, mesh.elem_area, mesh.edge_tri,
-                                    dynamics.visc_gamma0, dynamics.visc_gamma1, dynamics.visc_gamma2,
-                                    dt, partit.myDim_elem2D, partit.eDim_elem2D, partit.myDim_edge2D, partit.eDim_edge2D)
-dynamics.u_c = exchange_elem3D(dynamics.u_c, partit)  # needs to be taken out of jax
-dynamics.v_c = exchange_elem3D(dynamics.v_c, partit)  # needs to be taken out of jax
-# Call the second function (handles external function calls and completes computation)
-dynamics.U_rhs, dynamics.V_rhs, U_c, V_c = visc_filt_bilapl_second_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c,
+    dynamics.u_c, dynamics.v_c = visc_filt_bilapl_first_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c, dynamics.v_c,
+                                        mesh.ulevels, mesh.nlevels, mesh.elem_area, mesh.edge_tri,
+                                        dynamics.visc_gamma0, dynamics.visc_gamma1, dynamics.visc_gamma2,
+                                        dt, partit.myDim_elem2D, partit.eDim_elem2D, partit.myDim_edge2D, partit.eDim_edge2D)
+    dynamics.u_c = exchange_elem3D(dynamics.u_c, partit)  # needs to be taken out of jax
+    dynamics.v_c = exchange_elem3D(dynamics.v_c, partit)  # needs to be taken out of jax
+    # Call the second function (handles external function calls and completes computation)
+    dynamics.U_rhs, dynamics.V_rhs, U_c, V_c = visc_filt_bilapl_second_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.u_c,
                                                  dynamics.v_c, mesh.ulevels, mesh.nlevels, mesh.elem_area, mesh.edge_tri,
                                                  partit.myDim_edge2D, partit.eDim_edge2D)
-                                                 
-t2 = time.time()
 
 
-if (partit.mype==0):
-    print("runtime for visc_filt_bilapl_jit:", t2 - t1)
-
-
-if partit.mype == 1:
-    print("............................................................")
-    print("nlevels:", mesh.ulevels[8], mesh.nlevels[8])
-    print("helem:",   mesh.helem[:, 8])
-    print("zbar_e_bot:",   mesh.zbar_e_bot[8])
-    
-
-
-if partit.mype == 1:
-    print("U_rhs 1", dynamics.U_rhs[:,8])
-
-if partit.mype == 1:
-    print("U 1", dynamics.u[:,8])
-
-
-dynamics.U_rhs, dynamics.V_rhs = impl_vert_visc_ale_opt_jit(
+    dynamics.U_rhs, dynamics.V_rhs = impl_vert_visc_ale_opt_jit(
     dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.w_i,
     stress_surf, dynamics.Av, mesh.elem_area, mesh.elem2D, mesh.ulevels, mesh.nlevels,
     mesh.zbar_e_bot, mesh.helem, C_d, partit.myDim_elem2D, dt)
 
+    if partit.mype == 0:
+        print("UV_rhs", jnp.sum(jnp.abs(dynamics.U_rhs[0,:])), jnp.sum(jnp.abs(dynamics.V_rhs[0,:])))
 
-if partit.mype == 1:
-    print("U_rhs 2", dynamics.U_rhs[:,8])
-print("U_rhs total sum 2:", partit.mype, jnp.sum(dynamics.U_rhs[:,:partit.myDim_elem2D]))
 
-if partit.mype == 1:
-    print(mesh.ulevels[8], mesh.nlevels[8])
-
-dynamics.ssh_rhs = compute_ssh_rhs_ale_jit(
+    dynamics.ssh_rhs = compute_ssh_rhs_ale_jit(
     dynamics.u, dynamics.v,  # U and V velocities
     dynamics.U_rhs, dynamics.V_rhs,  # RHS terms
     dynamics.ssh_rhs, dynamics.ssh_rhs_old,  # SSH terms
@@ -187,61 +136,32 @@ dynamics.ssh_rhs = compute_ssh_rhs_ale_jit(
     mesh.ulevels, mesh.nlevels, mesh.helem, mesh.areasvol,  # Level and area info
     partit.myDim_nod2D, partit.myDim_edge2D,  # Partition info
     which_ALE  # ALE configuration
-)
+    )
 
-dynamics.ssh_rhs = exchange_nod2D(dynamics.ssh_rhs, partit)
+    dynamics.ssh_rhs = exchange_nod2D(dynamics.ssh_rhs, partit)
+#   dynamics.d_eta = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
+    dynamics.d_eta = ssh_solve_cg_jit(dynamics.ssh_rhs, dynamics.d_eta, solverinfo, mesh, partit)
 
-
-
-print("ssh_rhs_sum=", partit.mype, jnp.sum(dynamics.ssh_rhs))
-#print("edge_cross_dxdy=", partit.mype, jnp.sum(mesh.edge_cross_dxdy[2,:]))
-
-#print(jnp.min(mesh.edges[0,:]), jnp.min(mesh.edges[1, :]))
-#print(jnp.min(mesh.edge_tri[0,:]), jnp.min(mesh.edge_tri[1, :]))
-#print(partit.mype, partit.myDim_nod2D, partit.myDim_edge2D)
-
-# Initialize preconditioner
-solverinfo = SolverInfo(partit.myDim_nod2D, partit.eDim_nod2D)
-rr, zz, pp, App = ssh_solve_preconditioner_jit(solverinfo, partit, mesh)
-
-# Initialize and solve SSH equation
-dynamics.d_eta = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
-dynamics.d_eta = ssh_solve_cg_jit(dynamics.ssh_rhs, dynamics.d_eta, solverinfo, mesh, partit)
-print("d_eta_sum=", partit.mype, jnp.sum(dynamics.d_eta))
-
-# Update velocity field
-dynamics.u, dynamics.v = update_vel_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.d_eta, mesh.elem2D, mesh.gradient_sca, mesh.ulevels, mesh.nlevels, g, theta, dt, partit.myDim_elem2D)
-
-# Exchange updated velocities between elements
-dynamics.u = exchange_elem3D(dynamics.u, partit)
-dynamics.v = exchange_elem3D(dynamics.v, partit)
-
-# Print some velocity stats to verify update
-print("UV update - rank:", partit.mype, 
-      "u mean:", jnp.sum(dynamics.u), 
-      "v mean:", jnp.sum(dynamics.v))
-
-
-# Update hbar using ALE formulation
-mesh.hbar, dynamics.ssh_rhs_old = compute_hbar_ale_jit(
+    # Update velocity field
+    dynamics.u, dynamics.v = update_vel_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.d_eta, mesh.elem2D, mesh.gradient_sca, mesh.ulevels, mesh.nlevels, g, theta, dt, partit.myDim_elem2D)
+    # Exchange updated velocities between elements
+    dynamics.u = exchange_elem3D(dynamics.u, partit)
+    dynamics.v = exchange_elem3D(dynamics.v, partit)
+    # Update hbar using ALE formulation
+    mesh.hbar_old, mesh.hbar, dynamics.ssh_rhs_old = compute_hbar_ale_jit(
     dynamics.u, dynamics.v, dynamics.water_flux, mesh.helem,
     mesh.edges, mesh.edge_tri, mesh.edge_cross_dxdy,
     mesh.elem2D, mesh.ulevels, mesh.ulevels_nod2D, mesh.nlevels,
-    mesh.area, mesh.hbar_old, 
+    mesh.area, mesh.hbar_old, mesh.hbar,
     partit.myDim_nod2D, partit.eDim_nod2D, partit.myDim_edge2D,
     partit.myDim_elem2D, dt, dynamics.ssh_rhs_old)
 
-dynamics.ssh_rhs_old=exchange_nod2D(dynamics.ssh_rhs_old, partit)
-mesh.hbar=exchange_nod2D(mesh.hbar, partit)
+    dynamics.ssh_rhs_old=exchange_nod2D(dynamics.ssh_rhs_old, partit)
+    mesh.hbar=exchange_nod2D(mesh.hbar, partit)
 
-mesh.dhe = compute_dhe_ale_jit(mesh.dhe, mesh.hbar, mesh.hbar_old, partit.myDim_elem2D, mesh.elem2D, mesh.ulevels)
-# mesh.dhe is allocated only with myDim_elem2D. No exchange needed?
-# Print sums of hbar, dhe, and ssh_rhs_old
-print("hbar/dhe/ssh_rhs_old", partit.mype, jnp.sum(mesh.hbar), jnp.sum(mesh.dhe), jnp.sum(dynamics.ssh_rhs_old))
-
-
-dynamics.eta_n=alpha*mesh.hbar+(1.0-alpha)*mesh.hbar_old
-
-
+    mesh.dhe = compute_dhe_ale_jit(mesh.dhe, mesh.hbar, mesh.hbar_old, partit.myDim_elem2D, mesh.elem2D, mesh.ulevels)
+    # mesh.dhe is allocated only with myDim_elem2D. No exchange needed?
+    dynamics.eta_n=alpha*mesh.hbar+(1.0-alpha)*mesh.hbar_old
+    print("hbar/dhe/ssh_rhs_old", partit.mype, jnp.sum(mesh.hbar), jnp.sum(mesh.dhe), jnp.sum(dynamics.eta_n))        
 partit.MPI_COMM_FESOM.Barrier()
 MPI.Finalize()
