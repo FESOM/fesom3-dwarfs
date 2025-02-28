@@ -558,7 +558,7 @@ def impl_vert_visc_ale_opt_jit(U, V, U_rhs, V_rhs, Wvel_i, stress_surf, Av, elem
     U_rhs, V_rhs = state
     return U_rhs, V_rhs
 
-@partial(jit, static_argnums=(4,))
+@partial(jax.jit, static_argnums=(4,))
 def sparse_matvec(values, colind, rowptr, x, myDim_nod2D):
     """JAX-compiled sparse matrix-vector multiplication using scan"""
     def row_dot(row):
@@ -816,3 +816,156 @@ def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
     # Final exchange of solution
     x = exchange_nod2D(x, partit)
     return x
+
+@jax.jit
+def update_vel_jit(U, V, U_rhs, V_rhs, d_eta, elem2D_nodes, gradient_sca, ulevels, nlevels, g, theta, dt, myDim_elem2D):
+    """Updates velocity field based on right-hand side terms and sea surface height gradient.
+    
+    Args:
+        U: U-velocity component array (nz, elem)
+        V: V-velocity component array (nz, elem)
+        U_rhs: Right-hand side terms for U velocity (nz, elem)
+        V_rhs: Right-hand side terms for V velocity (nz, elem)
+        d_eta: Sea surface height increment
+        elem2D_nodes: Element to nodes connectivity
+        gradient_sca: Gradient operators for scalar fields
+        ulevels: Upper levels for elements
+        nlevels: Number of levels for elements
+        g: Gravitational acceleration
+        theta: Time stepping parameter
+        dt: Time step
+        myDim_elem2D: Number of local 2D elements
+    
+    Returns:
+        Updated U and V velocity fields
+    """
+    def update_elem(elem, carry):
+        U_val, V_val = carry
+        
+        # Get element nodes and compute eta gradient terms
+        elnodes = elem2D_nodes[:, elem]
+        eta = -g * theta * dt * d_eta[elnodes]
+        Fx = jnp.sum(gradient_sca[0:3, elem] * eta)
+        Fy = jnp.sum(gradient_sca[3:6, elem] * eta)
+        
+        # Get vertical levels range
+        nzmin = ulevels[elem]-1
+        nzmax = nlevels[elem]
+        
+        # Update velocities for all levels
+        def update_level(nz, carry):
+            U_val, V_val = carry
+            new_U = U_val.at[nz, elem].set(U_val[nz, elem] + U_rhs[nz, elem] + Fx)
+            new_V = V_val.at[nz, elem].set(V_val[nz, elem] + V_rhs[nz, elem] + Fy)
+            return (new_U, new_V)
+        
+        U_new, V_new = jax.lax.fori_loop(
+            nzmin,
+            nzmax,
+            lambda i, val: update_level(i, val),
+            (U_val, V_val)
+        )
+        
+        return (U_new, V_new)
+    
+    # Process all elements
+    U_final, V_final = jax.lax.fori_loop(
+        0,
+        myDim_elem2D,
+        lambda i, val: update_elem(i, val),
+        (U, V)
+    )
+    
+    return U_final, V_final
+
+@partial(jax.jit, static_argnums=(13, 14, 15, 16))
+def compute_hbar_ale_jit(u, v, water_flux, helem, edges, edge_tri, edge_cross_dxdy, 
+                        elem2D, ulevels, ulevels_nod2D, nlevels, area, hbar_old,
+                        myDim_nod2D, eDim_nod2D, myDim_edge2D, myDim_elem2D, dt, ssh_rhs_old):
+    """Compute hbar for ALE (Arbitrary Lagrangian-Eulerian) formulation.
+    Ported from oce_ale.F90:compute_hbar_ale.
+    
+    Returns:
+        hbar: Updated thickness field
+        ssh_rhs_old: SSH right-hand side terms
+    """
+    # Zero out ssh_rhs_old
+    ssh_rhs_old = ssh_rhs_old.at[:].set(0.0)
+    
+    # Process all edges
+    def process_edge(ed, ssh_rhs_old):
+        enodes = edges[:, ed]
+        el = edge_tri[:, ed]
+        
+        # First element contribution
+        deltaX1 = edge_cross_dxdy[0, ed]
+        deltaY1 = edge_cross_dxdy[1, ed]
+        nzmin1 = ulevels[el[0]]-1
+        nzmax1 = nlevels[el[0]]
+        
+        def sum_first_elem(nz, acc):
+            return acc + (v[nz, el[0]]*deltaX1 - u[nz, el[0]]*deltaY1) * helem[nz, el[0]]
+        
+        c1 = jax.lax.fori_loop(nzmin1, nzmax1, sum_first_elem, 0.0)
+        
+        # Second element contribution (if not boundary)
+        def sum_second_elem(nz, acc):
+            return acc - (v[nz, el[1]]*edge_cross_dxdy[2, ed] - 
+                         u[nz, el[1]]*edge_cross_dxdy[3, ed]) * helem[nz, el[1]]
+        
+        # Only compute c2 if el[1] is valid
+        def compute_c2():
+            return jax.lax.fori_loop(ulevels[el[1]]-1, nlevels[el[1]], sum_second_elem, 0.0)
+        
+        def zero_c2():
+            return 0.0
+        
+        c2 = jax.lax.cond(el[1] >= 0, compute_c2, zero_c2)
+        
+        # Add contributions to nodes
+        ssh_rhs_old = ssh_rhs_old.at[enodes[0]].add(c1+c2)
+        ssh_rhs_old = ssh_rhs_old.at[enodes[1]].add(-(c1+c2))
+                
+        return ssh_rhs_old
+    
+    ssh_rhs_old = jax.lax.fori_loop(0, myDim_edge2D, lambda i, val: process_edge(i, val), ssh_rhs_old)
+    
+    # Account for water flux
+    def apply_water_flux(n, ssh_rhs_old):
+        nzmin = ulevels_nod2D[n]-1
+        return ssh_rhs_old.at[n].add(-water_flux[n] * area[nzmin, n])
+    
+    # ssh_rhs_old = jax.lax.fori_loop(0, myDim_nod2D, lambda i, val: apply_water_flux(i, val), ssh_rhs_old)
+    
+    # Update thickness
+    hbar = jnp.copy(hbar_old)
+    
+    def update_hbar(n, hbar):
+        nzmin = ulevels_nod2D[n]-1
+        return hbar.at[n].set(hbar_old[n] + ssh_rhs_old[n]*dt/area[nzmin, n])
+    
+    hbar = jax.lax.fori_loop(0, myDim_nod2D, lambda i, val: update_hbar(i, val), hbar)
+    
+    return hbar, ssh_rhs_old
+
+@partial(jax.jit, static_argnums=(3,))
+def compute_dhe_ale_jit(dhe, hbar, hbar_old, myDim_elem2D, elem2D, ulevels):
+    """Compute dhe (element thickness changes) for ALE formulation.
+    Args:
+        dhe: Pre-allocated array for element thickness changes
+        hbar: Updated thickness field
+        hbar_old: Previous thickness field
+        myDim_elem2D: Number of elements in 2D (static)
+        elem2D: Element to node connectivity
+        ulevels: Upper levels for elements
+    Returns:
+        dhe: Updated element thickness changes
+    """
+    def update_dhe(elem, dhe):
+        elnodes = elem2D[:, elem]
+        value = jnp.where(ulevels[elem] > 1, 0.0, jnp.sum(hbar[elnodes] - hbar_old[elnodes])/3.0)
+        return dhe.at[elem].set(value)
+    
+    dhe = jax.lax.fori_loop(0, myDim_elem2D, lambda i, val: update_dhe(i, val), dhe)
+    
+    return dhe

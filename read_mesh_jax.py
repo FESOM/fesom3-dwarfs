@@ -209,5 +209,39 @@ dynamics.d_eta = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
 dynamics.d_eta = ssh_solve_cg_jit(dynamics.ssh_rhs, dynamics.d_eta, solverinfo, mesh, partit)
 print("d_eta_sum=", partit.mype, jnp.sum(dynamics.d_eta))
 
+# Update velocity field
+dynamics.u, dynamics.v = update_vel_jit(dynamics.u, dynamics.v, dynamics.U_rhs, dynamics.V_rhs, dynamics.d_eta, mesh.elem2D, mesh.gradient_sca, mesh.ulevels, mesh.nlevels, g, theta, dt, partit.myDim_elem2D)
+
+# Exchange updated velocities between elements
+dynamics.u = exchange_elem3D(dynamics.u, partit)
+dynamics.v = exchange_elem3D(dynamics.v, partit)
+
+# Print some velocity stats to verify update
+print("UV update - rank:", partit.mype, 
+      "u mean:", jnp.sum(dynamics.u), 
+      "v mean:", jnp.sum(dynamics.v))
+
+
+# Update hbar using ALE formulation
+mesh.hbar, dynamics.ssh_rhs_old = compute_hbar_ale_jit(
+    dynamics.u, dynamics.v, dynamics.water_flux, mesh.helem,
+    mesh.edges, mesh.edge_tri, mesh.edge_cross_dxdy,
+    mesh.elem2D, mesh.ulevels, mesh.ulevels_nod2D, mesh.nlevels,
+    mesh.area, mesh.hbar_old, 
+    partit.myDim_nod2D, partit.eDim_nod2D, partit.myDim_edge2D,
+    partit.myDim_elem2D, dt, dynamics.ssh_rhs_old)
+
+dynamics.ssh_rhs_old=exchange_nod2D(dynamics.ssh_rhs_old, partit)
+mesh.hbar=exchange_nod2D(mesh.hbar, partit)
+
+mesh.dhe = compute_dhe_ale_jit(mesh.dhe, mesh.hbar, mesh.hbar_old, partit.myDim_elem2D, mesh.elem2D, mesh.ulevels)
+# mesh.dhe is allocated only with myDim_elem2D. No exchange needed?
+# Print sums of hbar, dhe, and ssh_rhs_old
+print("hbar/dhe/ssh_rhs_old", partit.mype, jnp.sum(mesh.hbar), jnp.sum(mesh.dhe), jnp.sum(dynamics.ssh_rhs_old))
+
+
+dynamics.eta_n=alpha*mesh.hbar+(1.0-alpha)*mesh.hbar_old
+
+
 partit.MPI_COMM_FESOM.Barrier()
 MPI.Finalize()
