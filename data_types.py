@@ -131,18 +131,15 @@ class Dynamics:
 
 @dataclass
 class SolverInfo:
-    def __init__(self, myDim_nod2D, eDim_nod2D):
-        self.ident = 1
-        self.maxiter = 2000
-        self.restart = 15
-        self.fillin = 3
-        self.lutype = 2
-        self.droptol = 1.e-8
-        self.soltol = 1e-5
-        
-        # Initialize arrays with zeros
-        total_size = myDim_nod2D + eDim_nod2D
-        self.rr = jnp.zeros(total_size)
-        self.zz = jnp.zeros(total_size)
-        self.pp = jnp.zeros(total_size)
-        self.App = jnp.zeros(total_size)
+    ident: int = 1
+    maxiter: int = 2000
+    restart: int = 15
+    fillin: int = 3
+    lutype: int = 2
+    droptol: float = 1.e-8
+    soltol: float = 1e-5
+    max_iter: int = 2000
+    rr: jnp.ndarray = field(default_factory=lambda: jnp.array([]))
+    zz: jnp.ndarray = field(default_factory=lambda: jnp.array([]))
+    pp: jnp.ndarray = field(default_factory=lambda: jnp.array([]))
+    App: jnp.ndarray = field(default_factory=lambda: jnp.array([]))

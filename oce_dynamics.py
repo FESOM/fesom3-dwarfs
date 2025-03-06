@@ -8,6 +8,7 @@ from module_rotate_grid import *
 from read_mesh_and_partition import *
 from jax import debug
 
+@partial(jax.jit, static_argnums=(7, 14))  # AB_order and myDim_elem2D are static
 def compute_vel_rhs_opt(U, V, U_rhs, V_rhs, U_rhsAB, V_rhsAB, eta_n, AB_order, elem_area, gradient_sca, coriolis, ulevels, nlevels, elem2D, myDim_elem2D, g, dt):
     eps = 1.e-1  # Small value for AB 2nd order offset
     ab_coefficients = {
@@ -19,81 +20,73 @@ def compute_vel_rhs_opt(U, V, U_rhs, V_rhs, U_rhsAB, V_rhsAB, eta_n, AB_order, e
     if ab1 is None:
         raise ValueError("Unsupported AB scheme. Use 2 or 3.")
 
+    # Pre-compute indices for all elements
+    elems = jnp.arange(myDim_elem2D)
+    
+    # Pre-compute common terms for all elements
+    elnodes = elem2D[:, elems]  # Shape: (3, myDim_elem2D)
+    pre = -g * eta_n[elnodes]  # Shape: (3, myDim_elem2D)
+    ff = coriolis[elems] * elem_area[elems]  # Shape: (myDim_elem2D,)
+    Fx = jnp.sum(gradient_sca[:3] * pre, axis=0)  # Shape: (myDim_elem2D,)
+    Fy = jnp.sum(gradient_sca[3:] * pre, axis=0)  # Shape: (myDim_elem2D,)
+
     def process_element(elem, state):
         U_rhs, V_rhs, U_rhsAB, V_rhsAB = state
         nzmin = ulevels[elem] - 1  # Convert from Fortran to Python 0-based indexing
         nzmax = nlevels[elem]      # Already adjusted for Python indexing
 
-        def ab_loop(nz, state):
-            U_rhs, V_rhs = state
+        # Batch update for vertical levels
+        def update_level(nz, state):
+            U_rhs, V_rhs, U_rhsAB, V_rhsAB = state
+            
+            # AB scheme update
             if AB_order == 2:
                 U_rhs = U_rhs.at[nz, elem].set(ab1 * U_rhsAB[nz, elem, 0])
                 V_rhs = V_rhs.at[nz, elem].set(ab1 * V_rhsAB[nz, elem, 0])
-            elif AB_order == 3:
-                U_rhs = U_rhs.at[nz, elem].set(
-                    ab1 * U_rhsAB[nz, elem, 1] + ab2 * U_rhsAB[nz, elem, 0])
-                V_rhs = V_rhs.at[nz, elem].set(
-                    ab1 * V_rhsAB[nz, elem, 1] + ab2 * V_rhsAB[nz, elem, 0])
-            return U_rhs, V_rhs
-
-        state = (U_rhs, V_rhs)
-        U_rhs, V_rhs = lax.fori_loop(nzmin, nzmax, ab_loop, state)
-
-        elnodes = elem2D[:, elem]
-        pre = -g * eta_n[elnodes]
-        ff = coriolis[elem] * elem_area[elem]
-        Fx = jnp.sum(gradient_sca[:3, elem] * pre)
-        Fy = jnp.sum(gradient_sca[3:, elem] * pre)
-
-        def rhs_loop(nz, state):
-            U_rhs, V_rhs, U_rhsAB, V_rhsAB = state
-            U_rhs = U_rhs.at[nz, elem].add(Fx * elem_area[elem])
-            V_rhs = V_rhs.at[nz, elem].add(Fy * elem_area[elem])
+            else:  # AB_order == 3
+                U_rhs = U_rhs.at[nz, elem].set(ab1 * U_rhsAB[nz, elem, 1] + ab2 * U_rhsAB[nz, elem, 0])
+                V_rhs = V_rhs.at[nz, elem].set(ab1 * V_rhsAB[nz, elem, 1] + ab2 * V_rhsAB[nz, elem, 0])
+            
+            # Add pressure gradient terms
+            U_rhs = U_rhs.at[nz, elem].add(Fx[elem] * elem_area[elem])
+            V_rhs = V_rhs.at[nz, elem].add(Fy[elem] * elem_area[elem])
+            
+            # Update AB terms
             if AB_order == 2:
-                U_rhsAB = U_rhsAB.at[nz, elem, 0].set(V[nz, elem] * ff)
-                V_rhsAB = V_rhsAB.at[nz, elem, 0].set(-U[nz, elem] * ff)
-            elif AB_order == 3:
+                U_rhsAB = U_rhsAB.at[nz, elem, 0].set(V[nz, elem] * ff[elem])
+                V_rhsAB = V_rhsAB.at[nz, elem, 0].set(-U[nz, elem] * ff[elem])
+            else:  # AB_order == 3
                 U_rhsAB = U_rhsAB.at[nz, elem, 1].set(U_rhsAB[nz, elem, 0])
                 V_rhsAB = V_rhsAB.at[nz, elem, 1].set(V_rhsAB[nz, elem, 0])
-                U_rhsAB = U_rhsAB.at[nz, elem, 0].set(V[nz, elem] * ff)
-                V_rhsAB = V_rhsAB.at[nz, elem, 0].set(-U[nz, elem] * ff)
+                U_rhsAB = U_rhsAB.at[nz, elem, 0].set(V[nz, elem] * ff[elem])
+                V_rhsAB = V_rhsAB.at[nz, elem, 0].set(-U[nz, elem] * ff[elem])
+            
             return U_rhs, V_rhs, U_rhsAB, V_rhsAB
 
-        U_rhs, V_rhs, U_rhsAB, V_rhsAB = lax.fori_loop(
-            nzmin, nzmax, rhs_loop, (U_rhs, V_rhs, U_rhsAB, V_rhsAB)
-        )
-        return U_rhs, V_rhs, U_rhsAB, V_rhsAB
-
-    state = (U_rhs, V_rhs, U_rhsAB, V_rhsAB)
-    state = lax.fori_loop(0, myDim_elem2D, process_element, state)
-    U_rhs, V_rhs, U_rhsAB, V_rhsAB = state
-
-    # Update velocity RHS
-    ff = ab2 if AB_order == 2 else ab3
-
-    def update_rhs(elem, state):
+        # Process all levels for this element
+        state = lax.fori_loop(nzmin, nzmax, update_level, (U_rhs, V_rhs, U_rhsAB, V_rhsAB))
+        
+        # Final RHS update for this element
         U_rhs, V_rhs, U_rhsAB, V_rhsAB = state
-        nzmin = ulevels[elem] - 1  # Convert from Fortran to Python 0-based indexing
-        nzmax = nlevels[elem]      # Already adjusted for Python indexing
-
-        def update_loop(nz, state):
+        ff_final = ab2 if AB_order == 2 else ab3
+        
+        def final_update(nz, state):
             U_rhs, V_rhs = state
             U_rhs = U_rhs.at[nz, elem].set(
-                dt * (U_rhs[nz, elem] + U_rhsAB[nz, elem, 0] * ff) / elem_area[elem]
+                dt * (U_rhs[nz, elem] + U_rhsAB[nz, elem, 0] * ff_final) / elem_area[elem]
             )
             V_rhs = V_rhs.at[nz, elem].set(
-                dt * (V_rhs[nz, elem] + V_rhsAB[nz, elem, 0] * ff) / elem_area[elem]
+                dt * (V_rhs[nz, elem] + V_rhsAB[nz, elem, 0] * ff_final) / elem_area[elem]
             )
             return U_rhs, V_rhs
-
-        U_rhs, V_rhs = lax.fori_loop(nzmin, nzmax, update_loop, (U_rhs, V_rhs))
+        
+        U_rhs, V_rhs = lax.fori_loop(nzmin, nzmax, final_update, (U_rhs, V_rhs))
         return U_rhs, V_rhs, U_rhsAB, V_rhsAB
 
-    state = lax.fori_loop(0, myDim_elem2D, update_rhs, state)
-    U_rhs, V_rhs, U_rhsAB, V_rhsAB = state
-
-    return U_rhs, V_rhs, U_rhsAB, V_rhsAB
-compute_vel_rhs_opt_jit = jit(compute_vel_rhs_opt, static_argnums=(7,))
+    # Process all elements
+    state = (U_rhs, V_rhs, U_rhsAB, V_rhsAB)
+    state = lax.fori_loop(0, myDim_elem2D, process_element, state)
+    return state
 
 def visc_filt_bilapl(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem_area, edge_tri,
                      visc_gamma0, visc_gamma1, visc_gamma2, dt, myDim_elem2D, eDim_elem2D, myDim_edge2D, eDim_edge2D):
@@ -204,8 +197,7 @@ def visc_filt_bilapl(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem_area, 
     U_rhs, V_rhs = lax.fori_loop(0, myDim_edge2D + eDim_edge2D, update_rhs, (U_rhs, V_rhs))
 
     return U_rhs, V_rhs, U_c, V_c
-visc_filt_bilapl_jit = jax.jit(visc_filt_bilapl)
-
+@partial(jax.jit, static_argnums=(10, 11, 12, 13, 14, 15, 16, 17))
 def visc_filt_bilapl_first(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem_area, edge_tri,
                            visc_gamma0, visc_gamma1, visc_gamma2, dt, myDim_elem2D, eDim_elem2D, myDim_edge2D, eDim_edge2D):
     # Step 1: Reset U_c and V_c
@@ -277,8 +269,8 @@ def visc_filt_bilapl_first(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem_
 
     U_c, V_c = lax.fori_loop(0, myDim_elem2D, process_element, (U_c, V_c))
     return U_c, V_c
-visc_filt_bilapl_first_jit = jax.jit(visc_filt_bilapl_first)
 
+@partial(jax.jit, static_argnums=(10, 11))
 def visc_filt_bilapl_second(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem_area, edge_tri,
                             myDim_edge2D, eDim_edge2D):
     def update_rhs(ed, state):
@@ -318,10 +310,9 @@ def visc_filt_bilapl_second(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem
     U_rhs, V_rhs = lax.fori_loop(0, myDim_edge2D + eDim_edge2D, update_rhs, (U_rhs, V_rhs))
 
     return U_rhs, V_rhs, U_c, V_c
-visc_filt_bilapl_second_jit = jax.jit(visc_filt_bilapl_second)
 
-
-def impl_vert_visc_ale_opt_jit(U, V, U_rhs, V_rhs, Wvel_i, stress_surf, Av, elem_area, elem2D, ulevels, nlevels,
+@partial(jax.jit, static_argnums=(14,))  # Only myDim_elem2D is static
+def impl_vert_visc_ale_opt(U, V, U_rhs, V_rhs, Wvel_i, stress_surf, Av, elem_area, elem2D, ulevels, nlevels,
                                zbar_e_bot,
                                helem, C_d, myDim_elem2D, dt):
     max_nz = U.shape[0]  # Calculate max_nz dynamically based on the input shape
@@ -570,6 +561,7 @@ def sparse_matvec(values, colind, rowptr, x, myDim_nod2D):
     
     return jax.vmap(row_dot)(jnp.arange(myDim_nod2D))
 
+@partial(jax.jit, static_argnums=(15,16,17,))  # myDim_nod2D, myDim_edge2D, and which_ALE are static
 def compute_ssh_rhs_ale(u, v, u_rhs, v_rhs, ssh_rhs, ssh_rhs_old, water_flux, alpha, edges, edge_tri, edge_cross_dxdy,
                        ulevels, nlevels, helem, areasvol, myDim_nod2D, myDim_edge2D, which_ALE):
     # Initialize ssh_rhs to zero
@@ -656,9 +648,8 @@ def compute_ssh_rhs_ale(u, v, u_rhs, v_rhs, ssh_rhs, ssh_rhs_old, water_flux, al
     # Note: This is handled by the caller in read_mesh_jax.py
     
     return ssh_rhs
-compute_ssh_rhs_ale_jit = jax.jit(compute_ssh_rhs_ale, static_argnames=['which_ALE'])
 
-def ssh_solve_preconditioner_jit(solverinfo, partit, mesh):
+def ssh_solve_preconditioner(solverinfo, partit, mesh):
     """
     Preconditioner follows MITgcm (JGR, 102,5753-5766, 1997)
     If the row r of the ssh equation is a_r eta_r +\sum a_i\eta_i=rhs_row_r
@@ -728,7 +719,7 @@ def ssh_solve_preconditioner_jit(solverinfo, partit, mesh):
     
     return solverinfo.rr, solverinfo.zz, solverinfo.pp, solverinfo.App
 
-def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
+def ssh_solve_cg(rhs, x, solverinfo, mesh, partit):
     """Conjugate gradient solver for the SSH equation
     
     This implementation follows the Fortran version exactly.
@@ -775,7 +766,7 @@ def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
     # Main CG iteration loop
     for iter in range(max_iter):
 
-        print("solver: ", partit.mype, iter+1, rel_res)
+#        print("solver: ", partit.mype, iter+1, rel_res)
                
         # Exchange pp before matrix-vector multiplication
         pp = exchange_nod2D(pp, partit)
@@ -818,9 +809,10 @@ def ssh_solve_cg_jit(rhs, x, solverinfo, mesh, partit):
     x = exchange_nod2D(x, partit)
     return x
 
-@jax.jit
-def update_vel_jit(U, V, U_rhs, V_rhs, d_eta, elem2D_nodes, gradient_sca, ulevels, nlevels, g, theta, dt, myDim_elem2D):
+@partial(jax.jit, static_argnums=(12,))
+def update_vel(U, V, U_rhs, V_rhs, d_eta, elem2D_nodes, gradient_sca, ulevels, nlevels, g, theta, dt, myDim_elem2D):
     """Updates velocity field based on right-hand side terms and sea surface height gradient.
+    GPU-optimized version that maintains MPI compatibility and Fortran structure.
     
     Args:
         U: U-velocity component array (nz, elem)
@@ -840,47 +832,43 @@ def update_vel_jit(U, V, U_rhs, V_rhs, d_eta, elem2D_nodes, gradient_sca, ulevel
     Returns:
         Updated U and V velocity fields
     """
-    def update_elem(elem, carry):
-        U_val, V_val = carry
-        
-        # Get element nodes and compute eta gradient terms
-        elnodes = elem2D_nodes[:, elem]
-        eta = -g * theta * dt * d_eta[elnodes]
-        Fx = jnp.sum(gradient_sca[0:3, elem] * eta)
-        Fy = jnp.sum(gradient_sca[3:6, elem] * eta)
-        
-        # Get vertical levels range
-        nzmin = ulevels[elem]-1
-        nzmax = nlevels[elem]
-        
-        # Update velocities for all levels
-        def update_level(nz, carry):
-            U_val, V_val = carry
-            new_U = U_val.at[nz, elem].set(U_val[nz, elem] + U_rhs[nz, elem] + Fx)
-            new_V = V_val.at[nz, elem].set(V_val[nz, elem] + V_rhs[nz, elem] + Fy)
-            return (new_U, new_V)
-        
-        U_new, V_new = jax.lax.fori_loop(
-            nzmin,
-            nzmax,
-            lambda i, val: update_level(i, val),
-            (U_val, V_val)
-        )
-        
-        return (U_new, V_new)
+    # Pre-compute eta gradient terms for all elements at once
+    eta = -g * theta * dt * d_eta[elem2D_nodes[:, :myDim_elem2D]]
+    Fx = jnp.sum(gradient_sca[0:3, :myDim_elem2D] * eta, axis=0)
+    Fy = jnp.sum(gradient_sca[3:6, :myDim_elem2D] * eta, axis=0)
     
-    # Process all elements
-    U_final, V_final = jax.lax.fori_loop(
-        0,
-        myDim_elem2D,
-        lambda i, val: update_elem(i, val),
-        (U, V)
+    # Create level indices and masks
+    nz = U.shape[0]
+    level_indices = jnp.arange(nz)[:, None]
+    level_indices = jnp.broadcast_to(level_indices, (nz, myDim_elem2D))
+    
+    # Get level ranges
+    ulevels_local = ulevels[:myDim_elem2D]
+    nlevels_local = nlevels[:myDim_elem2D]
+    
+    # Create masks for valid levels
+    level_mask = (level_indices >= (ulevels_local - 1)) & (level_indices < nlevels_local)
+    
+    # Prepare gradient terms
+    Fx = jnp.broadcast_to(Fx, (nz, myDim_elem2D))
+    Fy = jnp.broadcast_to(Fy, (nz, myDim_elem2D))
+    
+    # Update velocities in parallel
+    U_new = U.at[:, :myDim_elem2D].set(
+        jnp.where(level_mask, 
+                 U[:, :myDim_elem2D] + U_rhs[:, :myDim_elem2D] + Fx,
+                 U[:, :myDim_elem2D])
+    )
+    V_new = V.at[:, :myDim_elem2D].set(
+        jnp.where(level_mask,
+                 V[:, :myDim_elem2D] + V_rhs[:, :myDim_elem2D] + Fy,
+                 V[:, :myDim_elem2D])
     )
     
-    return U_final, V_final
+    return U_new, V_new
 
 @partial(jax.jit, static_argnums=(14, 15, 16, 17))
-def compute_hbar_ale_jit(u, v, water_flux, helem, edges, edge_tri, edge_cross_dxdy, 
+def compute_hbar_ale(u, v, water_flux, helem, edges, edge_tri, edge_cross_dxdy, 
                         elem2D, ulevels, ulevels_nod2D, nlevels, area, hbar_old, hbar,
                         myDim_nod2D, eDim_nod2D, myDim_edge2D, myDim_elem2D, dt, ssh_rhs_old):
     """Compute hbar for ALE (Arbitrary Lagrangian-Eulerian) formulation.
@@ -950,7 +938,7 @@ def compute_hbar_ale_jit(u, v, water_flux, helem, edges, edge_tri, edge_cross_dx
     return hbar_old, hbar, ssh_rhs_old
 
 @partial(jax.jit, static_argnums=(3,))
-def compute_dhe_ale_jit(dhe, hbar, hbar_old, myDim_elem2D, elem2D, ulevels):
+def compute_dhe_ale(dhe, hbar, hbar_old, myDim_elem2D, elem2D, ulevels):
     """Compute dhe (element thickness changes) for ALE formulation.
     Args:
         dhe: Pre-allocated array for element thickness changes

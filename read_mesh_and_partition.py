@@ -1389,7 +1389,7 @@ def init_ale(mesh, partit):
     mesh.hnode_new = jnp.zeros((mesh.nl - 1, partit.myDim_nod2D + partit.eDim_nod2D))
     mesh.hbar = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
     mesh.hbar_old = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
-    mesh.helem = jnp.zeros((mesh.nl - 1, partit.myDim_elem2D + partit.eDim_nod2D))
+    mesh.helem = jnp.zeros((mesh.nl - 1, partit.myDim_elem2D + partit.eDim_elem2D))
     mesh.dhe = jnp.zeros(partit.myDim_elem2D)
     mesh.zbar_3d_n = jnp.zeros((mesh.nl, partit.myDim_nod2D + partit.eDim_nod2D))
 
@@ -1405,7 +1405,7 @@ def init_ale(mesh, partit):
                 mesh.Z_3d_n[j, i] = 0.0
                 mesh.Z_3d_n_ib[j, i] = 0.0
 
-    mesh.bottom_elem_thickness = jnp.zeros(partit.myDim_elem2D + partit.eDim_nod2D)
+    mesh.bottom_elem_thickness = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D)
     mesh.zbar_e_bot = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D)
     mesh.zbar_e_srf = jnp.zeros(partit.myDim_elem2D + partit.eDim_elem2D)
     mesh.bottom_node_thickness = jnp.zeros(partit.myDim_nod2D + partit.eDim_nod2D)
