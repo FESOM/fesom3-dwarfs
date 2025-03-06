@@ -70,6 +70,7 @@ import time
 
 #mesh.helem = exchange_elem2D(mesh.helem, partit)
 from oce_dynamics import *
+from gen_halo_exchange import *
 
 mesh.helem = exchange_elem3D(mesh.helem, partit)
 mesh.areasvol = exchange_nod3D(mesh.areasvol, partit)
