@@ -8,7 +8,7 @@ from module_rotate_grid import *
 from read_mesh_and_partition import *
 from jax import debug
 
-@partial(jax.jit, static_argnums=(7, 14))  # AB_order and myDim_elem2D are static
+@partial(jax.jit, static_argnums=(7,14))  # AB_order and myDim_elem2D should be static
 def compute_vel_rhs_opt(U, V, U_rhs, V_rhs, U_rhsAB, V_rhsAB, eta_n, AB_order, elem_area, gradient_sca, coriolis, ulevels, nlevels, elem2D, myDim_elem2D, g, dt):
     eps = 1.e-1  # Small value for AB 2nd order offset
     ab_coefficients = {
@@ -20,73 +20,74 @@ def compute_vel_rhs_opt(U, V, U_rhs, V_rhs, U_rhsAB, V_rhsAB, eta_n, AB_order, e
     if ab1 is None:
         raise ValueError("Unsupported AB scheme. Use 2 or 3.")
 
-    # Pre-compute indices for all elements
-    elems = jnp.arange(myDim_elem2D)
-    
     # Pre-compute common terms for all elements
-    elnodes = elem2D[:, elems]  # Shape: (3, myDim_elem2D)
+    elnodes = elem2D[:, :myDim_elem2D]  # Shape: (3, myDim_elem2D)
     pre = -g * eta_n[elnodes]  # Shape: (3, myDim_elem2D)
-    ff = coriolis[elems] * elem_area[elems]  # Shape: (myDim_elem2D,)
+    ff = coriolis[:myDim_elem2D] * elem_area[:myDim_elem2D]  # Shape: (myDim_elem2D,)
     Fx = jnp.sum(gradient_sca[:3] * pre, axis=0)  # Shape: (myDim_elem2D,)
     Fy = jnp.sum(gradient_sca[3:] * pre, axis=0)  # Shape: (myDim_elem2D,)
 
-    def process_element(elem, state):
-        U_rhs, V_rhs, U_rhsAB, V_rhsAB = state
-        nzmin = ulevels[elem] - 1  # Convert from Fortran to Python 0-based indexing
-        nzmax = nlevels[elem]      # Already adjusted for Python indexing
+    # Create level masks for each element
+    nlevs = U.shape[0]  # Total number of levels
+    level_indices = jnp.arange(nlevs)[:, None]  # Shape: (nlevs, 1)
+    nzmin = ulevels[:myDim_elem2D] - 1  # Shape: (myDim_elem2D,)
+    nzmax = nlevels[:myDim_elem2D]      # Shape: (myDim_elem2D,)
+    level_mask = (level_indices >= nzmin) & (level_indices < nzmax)  # Shape: (nlevs, myDim_elem2D)
 
-        # Batch update for vertical levels
-        def update_level(nz, state):
-            U_rhs, V_rhs, U_rhsAB, V_rhsAB = state
-            
-            # AB scheme update
-            if AB_order == 2:
-                U_rhs = U_rhs.at[nz, elem].set(ab1 * U_rhsAB[nz, elem, 0])
-                V_rhs = V_rhs.at[nz, elem].set(ab1 * V_rhsAB[nz, elem, 0])
-            else:  # AB_order == 3
-                U_rhs = U_rhs.at[nz, elem].set(ab1 * U_rhsAB[nz, elem, 1] + ab2 * U_rhsAB[nz, elem, 0])
-                V_rhs = V_rhs.at[nz, elem].set(ab1 * V_rhsAB[nz, elem, 1] + ab2 * V_rhsAB[nz, elem, 0])
-            
-            # Add pressure gradient terms
-            U_rhs = U_rhs.at[nz, elem].add(Fx[elem] * elem_area[elem])
-            V_rhs = V_rhs.at[nz, elem].add(Fy[elem] * elem_area[elem])
-            
-            # Update AB terms
-            if AB_order == 2:
-                U_rhsAB = U_rhsAB.at[nz, elem, 0].set(V[nz, elem] * ff[elem])
-                V_rhsAB = V_rhsAB.at[nz, elem, 0].set(-U[nz, elem] * ff[elem])
-            else:  # AB_order == 3
-                U_rhsAB = U_rhsAB.at[nz, elem, 1].set(U_rhsAB[nz, elem, 0])
-                V_rhsAB = V_rhsAB.at[nz, elem, 1].set(V_rhsAB[nz, elem, 0])
-                U_rhsAB = U_rhsAB.at[nz, elem, 0].set(V[nz, elem] * ff[elem])
-                V_rhsAB = V_rhsAB.at[nz, elem, 0].set(-U[nz, elem] * ff[elem])
-            
-            return U_rhs, V_rhs, U_rhsAB, V_rhsAB
+    # AB scheme updates for all elements and levels
+    if AB_order == 2:
+        u_update = ab1 * U_rhsAB[:, :myDim_elem2D, 0]  # Shape: (nlevs, myDim_elem2D)
+        v_update = ab1 * V_rhsAB[:, :myDim_elem2D, 0]
+    else:  # AB_order == 3
+        u_update = ab1 * U_rhsAB[:, :myDim_elem2D, 1] + ab2 * U_rhsAB[:, :myDim_elem2D, 0]
+        v_update = ab1 * V_rhsAB[:, :myDim_elem2D, 1] + ab2 * V_rhsAB[:, :myDim_elem2D, 0]
 
-        # Process all levels for this element
-        state = lax.fori_loop(nzmin, nzmax, update_level, (U_rhs, V_rhs, U_rhsAB, V_rhsAB))
-        
-        # Final RHS update for this element
-        U_rhs, V_rhs, U_rhsAB, V_rhsAB = state
-        ff_final = ab2 if AB_order == 2 else ab3
-        
-        def final_update(nz, state):
-            U_rhs, V_rhs = state
-            U_rhs = U_rhs.at[nz, elem].set(
-                dt * (U_rhs[nz, elem] + U_rhsAB[nz, elem, 0] * ff_final) / elem_area[elem]
-            )
-            V_rhs = V_rhs.at[nz, elem].set(
-                dt * (V_rhs[nz, elem] + V_rhsAB[nz, elem, 0] * ff_final) / elem_area[elem]
-            )
-            return U_rhs, V_rhs
-        
-        U_rhs, V_rhs = lax.fori_loop(nzmin, nzmax, final_update, (U_rhs, V_rhs))
-        return U_rhs, V_rhs, U_rhsAB, V_rhsAB
+    # Add pressure gradient terms (broadcasting)
+    u_update = u_update + Fx[None, :] * elem_area[None, :myDim_elem2D]
+    v_update = v_update + Fy[None, :] * elem_area[None, :myDim_elem2D]
 
-    # Process all elements
-    state = (U_rhs, V_rhs, U_rhsAB, V_rhsAB)
-    state = lax.fori_loop(0, myDim_elem2D, process_element, state)
-    return state
+    # Compute AB terms for all elements and levels
+    u_rhsab =  V[:, :myDim_elem2D] * ff[None, :]
+    v_rhsab = -U[:, :myDim_elem2D] * ff[None, :]
+
+    # Final RHS update
+    ff_final = ab2 if AB_order == 2 else ab3
+    u_final = dt * (u_update + u_rhsab * ff_final) / elem_area[None, :myDim_elem2D]
+    v_final = dt * (v_update + v_rhsab * ff_final) / elem_area[None, :myDim_elem2D]
+
+    # Apply masks
+    U_rhs = U_rhs.at[:, :myDim_elem2D].set(
+        jnp.where(level_mask, u_final, U_rhs[:, :myDim_elem2D])
+    )
+    V_rhs = V_rhs.at[:, :myDim_elem2D].set(
+        jnp.where(level_mask, v_final, V_rhs[:, :myDim_elem2D])
+    )
+
+    # Update AB terms
+    if AB_order == 2:
+        U_rhsAB = U_rhsAB.at[:, :myDim_elem2D, 0].set(
+            jnp.where(level_mask, u_rhsab, U_rhsAB[:, :myDim_elem2D, 0])
+        )
+        V_rhsAB = V_rhsAB.at[:, :myDim_elem2D, 0].set(
+            jnp.where(level_mask, v_rhsab, V_rhsAB[:, :myDim_elem2D, 0])
+        )
+    else:  # AB_order == 3
+        # Move current values to next slot
+        U_rhsAB = U_rhsAB.at[:, :myDim_elem2D, 1].set(
+            jnp.where(level_mask, U_rhsAB[:, :myDim_elem2D, 0], U_rhsAB[:, :myDim_elem2D, 1])
+        )
+        V_rhsAB = V_rhsAB.at[:, :myDim_elem2D, 1].set(
+            jnp.where(level_mask, V_rhsAB[:, :myDim_elem2D, 0], V_rhsAB[:, :myDim_elem2D, 1])
+        )
+        # Set new values
+        U_rhsAB = U_rhsAB.at[:, :myDim_elem2D, 0].set(
+            jnp.where(level_mask, u_rhsab, U_rhsAB[:, :myDim_elem2D, 0])
+        )
+        V_rhsAB = V_rhsAB.at[:, :myDim_elem2D, 0].set(
+            jnp.where(level_mask, v_rhsab, V_rhsAB[:, :myDim_elem2D, 0])
+        )
+
+    return U_rhs, V_rhs, U_rhsAB, V_rhsAB
 
 def visc_filt_bilapl(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem_area, edge_tri,
                      visc_gamma0, visc_gamma1, visc_gamma2, dt, myDim_elem2D, eDim_elem2D, myDim_edge2D, eDim_edge2D):
