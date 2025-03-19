@@ -887,61 +887,71 @@ def compute_hbar_ale(u, v, water_flux, helem, edges, edge_tri, edge_cross_dxdy,
         ssh_rhs_old: SSH right-hand side terms
     """
     # Zero out ssh_rhs_old
-    ssh_rhs_old = ssh_rhs_old.at[:].set(0.0)
+    ssh_rhs_old = jnp.zeros_like(ssh_rhs_old)
     
-    # Process all edges
-    def process_edge(ed, ssh_rhs_old):
-        enodes = edges[:, ed]
-        el = edge_tri[:, ed]
-        
-        # First element contribution
-        deltaX1 = edge_cross_dxdy[0, ed]
-        deltaY1 = edge_cross_dxdy[1, ed]
-        nzmin1 = ulevels[el[0]]-1
-        nzmax1 = nlevels[el[0]]
-        
-        def sum_first_elem(nz, acc):
-            return acc + (v[nz, el[0]]*deltaX1 - u[nz, el[0]]*deltaY1) * helem[nz, el[0]]
-        
-        c1 = jax.lax.fori_loop(nzmin1, nzmax1, sum_first_elem, 0.0)
-        
-        # Second element contribution (if not boundary)
-        def sum_second_elem(nz, acc):
-            return acc - (v[nz, el[1]]*edge_cross_dxdy[2, ed] - 
-                         u[nz, el[1]]*edge_cross_dxdy[3, ed]) * helem[nz, el[1]]
-        
-        # Only compute c2 if el[1] is valid
-        def compute_c2():
-            return jax.lax.fori_loop(ulevels[el[1]]-1, nlevels[el[1]], sum_second_elem, 0.0)
-        
-        def zero_c2():
-            return 0.0
-        
-        c2 = jax.lax.cond(el[1] >= 0, compute_c2, zero_c2)
-        
-        # Add contributions to nodes
-        ssh_rhs_old = ssh_rhs_old.at[enodes[0]].add(c1+c2)
-        ssh_rhs_old = ssh_rhs_old.at[enodes[1]].add(-(c1+c2))
-                
-        return ssh_rhs_old
+    # Process all edges using vectorized operations
+    enodes = edges[:, :myDim_edge2D]  # (2, myDim_edge2D)
+    el = edge_tri[:, :myDim_edge2D]   # (2, myDim_edge2D)
     
-    ssh_rhs_old = jax.lax.fori_loop(0, myDim_edge2D, lambda i, val: process_edge(i, val), ssh_rhs_old)
+    # First element contribution
+    deltaX1 = edge_cross_dxdy[0, :myDim_edge2D]  # (myDim_edge2D,)
+    deltaY1 = edge_cross_dxdy[1, :myDim_edge2D]  # (myDim_edge2D,)
+    nzmin1 = ulevels[el[0]] - 1  # (myDim_edge2D,)
+    nzmax1 = nlevels[el[0]]      # (myDim_edge2D,)
     
-    # Account for water flux
-    def apply_water_flux(n, ssh_rhs_old):
-        nzmin = ulevels_nod2D[n]-1
-        return ssh_rhs_old.at[n].add(-water_flux[n] * area[nzmin, n])
+    # Create level masks for first elements
+    nz = u.shape[0]
+    level_indices = jnp.arange(nz)[:, None]  # (nz, 1)
+    level_indices = jnp.broadcast_to(level_indices, (nz, myDim_edge2D))  # (nz, myDim_edge2D)
     
-    # ssh_rhs_old = jax.lax.fori_loop(0, myDim_nod2D, lambda i, val: apply_water_flux(i, val), ssh_rhs_old)
+    # Mask for valid levels in first elements
+    mask1 = (level_indices >= nzmin1) & (level_indices < nzmax1)  # (nz, myDim_edge2D)
     
-    # Update thickness
+    # Compute first element contributions using masks
+    flux1 = jnp.where(mask1,
+                      (v[:, el[0]] * deltaX1 - u[:, el[0]] * deltaY1) * helem[:, el[0]],
+                      0.0)  # (nz, myDim_edge2D)
+    c1 = jnp.sum(flux1, axis=0)  # (myDim_edge2D,)
+    
+    # Second element contribution
+    deltaX2 = edge_cross_dxdy[2, :myDim_edge2D]  # (myDim_edge2D,)
+    deltaY2 = edge_cross_dxdy[3, :myDim_edge2D]  # (myDim_edge2D,)
+    
+    # Mask for valid second elements
+    valid_el2 = el[1] >= 0  # (myDim_edge2D,)
+    nzmin2 = jnp.where(valid_el2, ulevels[el[1]] - 1, 0)  # (myDim_edge2D,)
+    nzmax2 = jnp.where(valid_el2, nlevels[el[1]], 0)      # (myDim_edge2D,)
+    
+    # Mask for valid levels in second elements
+    mask2 = (level_indices >= nzmin2) & (level_indices < nzmax2) & valid_el2  # (nz, myDim_edge2D)
+    
+    # Compute second element contributions using masks
+    flux2 = jnp.where(mask2,
+                      -(v[:, el[1]] * deltaX2 - u[:, el[1]] * deltaY2) * helem[:, el[1]],
+                      0.0)  # (nz, myDim_edge2D)
+    c2 = jnp.sum(flux2, axis=0)  # (myDim_edge2D,)
+    
+    # Total contribution for each edge
+    total_contrib = c1 + c2  # (myDim_edge2D,)
+    
+    # Create updates array for scatter_add
+    updates = jnp.concatenate([total_contrib, -total_contrib])  # (2*myDim_edge2D,)
+    indices = jnp.ravel(enodes)  # (2*myDim_edge2D,)
+    
+    # Add contributions to nodes using scatter_add
+    ssh_rhs_old = ssh_rhs_old.at[indices].add(updates)
+    
+    # Account for water flux using vectorized operations
+    nzmin_nodes = ulevels_nod2D[:myDim_nod2D] - 1  # (myDim_nod2D,)
+    ssh_rhs_old = ssh_rhs_old.at[:myDim_nod2D].add(
+        -water_flux[:myDim_nod2D] * area[nzmin_nodes, jnp.arange(myDim_nod2D)]
+    )
+    
+    # Update thickness using vectorized operations
     hbar_old = jnp.copy(hbar)
-    
-    def update_hbar(n, hbar):
-        nzmin = ulevels_nod2D[n]-1
-        return hbar.at[n].set(hbar_old[n] + ssh_rhs_old[n]*dt/area[nzmin, n])
-    
-    hbar = jax.lax.fori_loop(0, myDim_nod2D, lambda i, val: update_hbar(i, val), hbar)
+    hbar = hbar.at[:myDim_nod2D].set(
+        hbar_old[:myDim_nod2D] + ssh_rhs_old[:myDim_nod2D] * dt / area[nzmin_nodes, jnp.arange(myDim_nod2D)]
+    )
     
     return hbar_old, hbar, ssh_rhs_old
 
