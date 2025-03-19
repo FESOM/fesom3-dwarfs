@@ -574,86 +574,76 @@ def compute_ssh_rhs_ale(u, v, u_rhs, v_rhs, ssh_rhs, ssh_rhs_old, water_flux, al
                        ulevels, nlevels, helem, areasvol, myDim_nod2D, myDim_edge2D, which_ALE):
     # Initialize ssh_rhs to zero
     ssh_rhs = ssh_rhs.at[:].set(0.0)
-
-    def process_edge(ed, ssh_rhs):
-        # Get nodes and elements for this edge
-        enodes = edges[:, ed]
-        el = edge_tri[:, ed]
-        
-        # Calculate depth integral for el[0]
-        c1 = 0.0
-        deltaX1 = edge_cross_dxdy[0, ed]
-        deltaY1 = edge_cross_dxdy[1, ed]
-        
-        nzmin = ulevels[el[0]]-1
-        nzmax = nlevels[el[0]]
-        
-        def integrate_flux_el1(nz, c1):
-            # Compute flux contribution for element 1
-            # Note: In Fortran UV(1,:,:) is U and UV(2,:,:) is V
-            flux = alpha * ((v[nz, el[0]] + v_rhs[nz, el[0]]) * deltaX1 - 
-                          (u[nz, el[0]] + u_rhs[nz, el[0]]) * deltaY1) * helem[nz, el[0]]
-            return c1 + flux
-
-        c1 = lax.fori_loop(nzmin, nzmax + 1, integrate_flux_el1, c1)  # +1 to match Fortran inclusive range
-        
-        # Calculate depth integral for el[1] if it exists
-        c2 = 0.0
-        def integrate_flux_el2(nz, c2):
-            deltaX2 = edge_cross_dxdy[2, ed]
-            deltaY2 = edge_cross_dxdy[3, ed]
-            # Compute flux contribution for element 2
-            flux = -alpha * ((v[nz, el[1]] + v_rhs[nz, el[1]]) * deltaX2 - 
-                           (u[nz, el[1]] + u_rhs[nz, el[1]]) * deltaY2) * helem[nz, el[1]]
-            return c2 + flux
-
-        # Only compute for el[1] if it exists (>= 0)
-        c2 = lax.cond(el[1] >=0,
-                     lambda x: lax.fori_loop(ulevels[el[1]] - 1, nlevels[el[1]], integrate_flux_el2, x),
-                     lambda x: x,
-                     c2)
-
-        # Update ssh_rhs for both nodes
-        ssh_rhs = ssh_rhs.at[enodes[0]].add(c1 + c2)
-        ssh_rhs = ssh_rhs.at[enodes[1]].add(-(c1 + c2))
-        
-        return ssh_rhs
-
-    # Process all edges
-    ssh_rhs = lax.fori_loop(0, myDim_edge2D, process_edge, ssh_rhs)
-
-    # Handle water flux boundary conditions
-    def process_node(n, ssh_rhs):
-        nzmin = ulevels[n] - 1  # Convert from Fortran to Python 0-based indexing
-        
-        # Add water flux and old rhs at surface if not using linfs scheme
-        def handle_surface(ssh_rhs):
-            ssh_rhs = ssh_rhs.at[n].add(
-                -alpha * water_flux[n] * areasvol[nzmin, n] + 
-                (1.0 - alpha) * ssh_rhs_old[n]
-            )
-            return ssh_rhs
-        
-        # Skip cavity points if which_ALE is 'linfs'
-        def handle_linfs(ssh_rhs):
-            ssh_rhs = lax.cond(ulevels[n] == 1,
-                             lambda x: x.at[n].add((1.0 - alpha) * ssh_rhs_old[n]),
-                             lambda x: x,
-                             ssh_rhs)
-            return ssh_rhs
-        
-        # Apply appropriate water flux handling based on ALE scheme
-        ssh_rhs = lax.cond(which_ALE == 'linfs',
-                          lambda x: handle_linfs(x),
-                          lambda x: handle_surface(x),
-                          ssh_rhs)
-        
-        return ssh_rhs
-
-    # Process water flux for all nodes
-    ssh_rhs = lax.fori_loop(0, myDim_nod2D, process_node, ssh_rhs)
-    # MPI exchange to synchronize ssh_rhs across ranks
-    # Note: This is handled by the caller in read_mesh_jax.py
+    
+    # Create masks for valid elements
+    valid_el1_mask = edge_tri[0, :myDim_edge2D] >= 0
+    valid_el2_mask = edge_tri[1, :myDim_edge2D] >= 0
+    
+    # Extract edge data
+    el1_indices = edge_tri[0, :myDim_edge2D]
+    el2_indices = edge_tri[1, :myDim_edge2D]
+    
+    # Calculate fluxes for first elements (el[0])
+    el1_nzmin = ulevels[el1_indices] - 1
+    el1_nzmax = nlevels[el1_indices]
+    
+    # Calculate fluxes for first elements using vectorized operations
+    # Create a mask for valid levels
+    max_levels = 100  # Maximum possible number of levels
+    level_indices = jnp.arange(max_levels)[:, None]  # Shape: (max_levels, 1)
+    el1_valid_levels = (level_indices >= el1_nzmin) & (level_indices < el1_nzmax)  # Shape: (max_levels, myDim_edge2D)
+    
+    # Calculate fluxes for all levels at once
+    el1_fluxes = jnp.where(
+        el1_valid_levels,
+        alpha * (
+            (v[level_indices, el1_indices] + v_rhs[level_indices, el1_indices]) * edge_cross_dxdy[0, :myDim_edge2D] -
+            (u[level_indices, el1_indices] + u_rhs[level_indices, el1_indices]) * edge_cross_dxdy[1, :myDim_edge2D]
+        ) * helem[level_indices, el1_indices],
+        0.0
+    )
+    c1 = jnp.sum(el1_fluxes, axis=0)
+    
+    # Calculate fluxes for second elements (el[1])
+    el2_nzmin = jnp.where(valid_el2_mask, ulevels[el2_indices] - 1, 0)
+    el2_nzmax = jnp.where(valid_el2_mask, nlevels[el2_indices], 0)
+    
+    # Create mask for valid levels in second elements
+    el2_valid_levels = (level_indices >= el2_nzmin) & (level_indices < el2_nzmax) & valid_el2_mask  # Shape: (max_levels, myDim_edge2D)
+    
+    # Calculate fluxes for all levels at once
+    el2_fluxes = jnp.where(
+        el2_valid_levels,
+        -alpha * (
+            (v[level_indices, el2_indices] + v_rhs[level_indices, el2_indices]) * edge_cross_dxdy[2, :myDim_edge2D] -
+            (u[level_indices, el2_indices] + u_rhs[level_indices, el2_indices]) * edge_cross_dxdy[3, :myDim_edge2D]
+        ) * helem[level_indices, el2_indices],
+        0.0
+    )
+    c2 = jnp.sum(el2_fluxes, axis=0)
+    
+    # Update ssh_rhs for all edges at once
+    total_flux = c1 + c2
+    ssh_rhs = ssh_rhs.at[edges[0, :myDim_edge2D]].add(total_flux)
+    ssh_rhs = ssh_rhs.at[edges[1, :myDim_edge2D]].add(-total_flux)
+    
+    # Handle water flux boundary conditions vectorized
+    nzmin = ulevels[:myDim_nod2D] - 1
+    surface_nodes = ulevels[:myDim_nod2D] == 1
+    
+    if which_ALE == 'linfs':
+        # For linfs scheme
+        ssh_rhs = ssh_rhs.at[:myDim_nod2D].add(
+            jnp.where(surface_nodes,
+                     (1.0 - alpha) * ssh_rhs_old[:myDim_nod2D],
+                     0.0)
+        )
+    else:
+        # For other schemes
+        ssh_rhs = ssh_rhs.at[:myDim_nod2D].add(
+            -alpha * water_flux[:myDim_nod2D] * areasvol[nzmin, jnp.arange(myDim_nod2D)] +
+            (1.0 - alpha) * ssh_rhs_old[:myDim_nod2D]
+        )
     
     return ssh_rhs
 
@@ -817,7 +807,7 @@ def ssh_solve_cg(rhs, x, solverinfo, mesh, partit):
     x = exchange_nod2D(x, partit)
     return x
 
-@partial(jax.jit, static_argnums=(12,))
+@partial(jax.jit, static_argnums=(12,))  # myDim_elem2D is static
 def update_vel(U, V, U_rhs, V_rhs, d_eta, elem2D_nodes, gradient_sca, ulevels, nlevels, g, theta, dt, myDim_elem2D):
     """Updates velocity field based on right-hand side terms and sea surface height gradient.
     GPU-optimized version that maintains MPI compatibility and Fortran structure.
@@ -932,14 +922,9 @@ def compute_hbar_ale(u, v, water_flux, helem, edges, edge_tri, edge_cross_dxdy,
     c2 = jnp.sum(flux2, axis=0)  # (myDim_edge2D,)
     
     # Total contribution for each edge
-    total_contrib = c1 + c2  # (myDim_edge2D,)
-    
-    # Create updates array for scatter_add
-    updates = jnp.concatenate([total_contrib, -total_contrib])  # (2*myDim_edge2D,)
-    indices = jnp.ravel(enodes)  # (2*myDim_edge2D,)
-    
-    # Add contributions to nodes using scatter_add
-    ssh_rhs_old = ssh_rhs_old.at[indices].add(updates)
+    total_contrib = c1 + jnp.where(valid_el2, c2, 0.0)
+    ssh_rhs_old = ssh_rhs_old.at[enodes[0, :myDim_edge2D]].add(total_contrib)
+    ssh_rhs_old = ssh_rhs_old.at[enodes[1, :myDim_edge2D]].add(-total_contrib)
     
     # Account for water flux using vectorized operations
     nzmin_nodes = ulevels_nod2D[:myDim_nod2D] - 1  # (myDim_nod2D,)
@@ -968,11 +953,16 @@ def compute_dhe_ale(dhe, hbar, hbar_old, myDim_elem2D, elem2D, ulevels):
     Returns:
         dhe: Updated element thickness changes
     """
-    def update_dhe(elem, dhe):
-        elnodes = elem2D[:, elem]
-        value = jnp.where(ulevels[elem] > 1, 0.0, jnp.sum(hbar[elnodes] - hbar_old[elnodes])/3.0)
-        return dhe.at[elem].set(value)
+    # Create mask for elements where ulevels > 1
+    mask = ulevels[:myDim_elem2D] > 1
     
-    dhe = jax.lax.fori_loop(0, myDim_elem2D, lambda i, val: update_dhe(i, val), dhe)
+    # Calculate differences for all elements at once
+    diffs = jnp.sum(hbar[elem2D[:, :myDim_elem2D]] - hbar_old[elem2D[:, :myDim_elem2D]], axis=0) / 3.0
+    
+    # Apply mask - set to 0.0 where mask is True
+    values = jnp.where(mask, 0.0, diffs)
+    
+    # Update dhe array
+    dhe = dhe.at[:myDim_elem2D].set(values)
     
     return dhe
