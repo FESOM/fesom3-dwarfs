@@ -89,116 +89,6 @@ def compute_vel_rhs_opt(U, V, U_rhs, V_rhs, U_rhsAB, V_rhsAB, eta_n, AB_order, e
 
     return U_rhs, V_rhs, U_rhsAB, V_rhsAB
 
-def visc_filt_bilapl(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem_area, edge_tri,
-                     visc_gamma0, visc_gamma1, visc_gamma2, dt, myDim_elem2D, eDim_elem2D, myDim_edge2D, eDim_edge2D):
-    # Step 1: Reset U_c and V_c
-    U_c = U_c.at[:, :].set(0.0)
-    V_c = V_c.at[:, :].set(0.0)
-
-    # Maximum depth
-    max_depth = u.shape[0]
-
-    # Step 2: Sum velocity differences over edges
-    def process_edge(ed, state):
-        U_c, V_c = state
-        el = edge_tri[:, ed]
-        nzmin = jnp.max(ulevels[el]) - 1
-        nzmax = jnp.min(nlevels[el])
-
-        # Fixed-size buffer
-        update_u = jnp.zeros((max_depth,))
-        update_v = jnp.zeros((max_depth,))
-
-        def compute_updates(nz, updates):
-            update_u, update_v = updates
-            du = u[nz, el[0]] - u[nz, el[1]]
-            dv = v[nz, el[0]] - v[nz, el[1]]
-            updates = (
-                update_u.at[nz].set(du),
-                update_v.at[nz].set(dv),
-            )
-            return updates
-
-        update_u, update_v = lax.fori_loop(nzmin, nzmax, compute_updates, (update_u, update_v))
-
-        # Mask to apply only to the valid range
-        mask = (jnp.arange(max_depth) >= nzmin) & (jnp.arange(max_depth) < nzmax)
-
-        # Apply updates with masking
-        U_c = U_c.at[:, el[0]].add(jnp.where(mask, -update_u, 0))
-        V_c = V_c.at[:, el[0]].add(jnp.where(mask, -update_v, 0))
-        U_c = U_c.at[:, el[1]].add(jnp.where(mask, update_u, 0))
-        V_c = V_c.at[:, el[1]].add(jnp.where(mask, update_v, 0))
-
-        return U_c, V_c
-
-    U_c, V_c = lax.fori_loop(0, myDim_edge2D + eDim_edge2D, process_edge, (U_c, V_c))
-
-    # Step 3: Compute viscosity on elements
-    def process_element(elem, state):
-        U_c, V_c = state
-        len_elem = jnp.sqrt(elem_area[elem])
-        nzmin = ulevels[elem]-1
-        nzmax = nlevels[elem]
-
-        def update_viscosity(nz, state):
-            U_c, V_c = state
-            u1 = U_c[nz, elem]**2 + V_c[nz, elem]**2
-            vi = jnp.max(jnp.array([
-                visc_gamma0,
-                visc_gamma1 * jnp.sqrt(u1),
-                visc_gamma2 * u1
-            ])) * len_elem * dt
-
-            U_c = U_c.at[nz, elem].set(-U_c[nz, elem] * vi)
-            V_c = V_c.at[nz, elem].set(-V_c[nz, elem] * vi)
-            return U_c, V_c
-
-        U_c, V_c = lax.fori_loop(nzmin, nzmax, update_viscosity, (U_c, V_c))
-        return U_c, V_c
-
-    U_c, V_c = lax.fori_loop(0, myDim_elem2D, process_element, (U_c, V_c))
-
-#    U_c = exchange_elem3D(U_c, partit) # needs to be taken out of jax
-#    V_c = exchange_elem3D(V_c, partit) # needs to be taken out of jax
-    # Step 4: Update U_rhs and V_rhs based on U_c and V_c
-    def update_rhs(ed, state):
-        U_rhs, V_rhs = state
-        el = edge_tri[:, ed]
-        nzmin = jnp.max(ulevels[el]) - 1
-        nzmax = jnp.min(nlevels[el])
-        # Maximum depth
-        max_depth = u.shape[0]
-        update_u = jnp.zeros((max_depth,))
-        update_v = jnp.zeros((max_depth,))
-
-        def compute_rhs_updates(nz, updates):
-            update_u, update_v = updates
-            du = U_c[nz, el[0]] - U_c[nz, el[1]]
-            dv = V_c[nz, el[0]] - V_c[nz, el[1]]
-            updates = (
-                update_u.at[nz].set(du),
-                update_v.at[nz].set(dv),
-            )
-            return updates
-
-        update_u, update_v = lax.fori_loop(nzmin, nzmax, compute_rhs_updates, (update_u, update_v))
-
-        # Mask to apply only to the valid range
-        mask = (jnp.arange(max_depth) >= nzmin) & (jnp.arange(max_depth) < nzmax)
-
-        # Apply updates with masking
-        U_rhs = U_rhs.at[:, el[0]].add(jnp.where(mask, -update_u / elem_area[el[0]], 0))
-        V_rhs = V_rhs.at[:, el[0]].add(jnp.where(mask, -update_v / elem_area[el[0]], 0))
-        U_rhs = U_rhs.at[:, el[1]].add(jnp.where(mask, update_u / elem_area[el[1]], 0))
-        V_rhs = V_rhs.at[:, el[1]].add(jnp.where(mask, update_v / elem_area[el[1]], 0))
-
-        return U_rhs, V_rhs
-
-    U_rhs, V_rhs = lax.fori_loop(0, myDim_edge2D + eDim_edge2D, update_rhs, (U_rhs, V_rhs))
-
-    return U_rhs, V_rhs, U_c, V_c
-
 @partial(jax.jit, static_argnums=(10, 11, 12, 13, 14, 15, 16, 17))
 def visc_filt_bilapl_first(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem_area, edge_tri,
                           visc_gamma0, visc_gamma1, visc_gamma2, dt, myDim_elem2D, eDim_elem2D, myDim_edge2D, eDim_edge2D):
@@ -281,42 +171,49 @@ def visc_filt_bilapl_first(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem_
 @partial(jax.jit, static_argnums=(10, 11))
 def visc_filt_bilapl_second(u, v, U_rhs, V_rhs, U_c, V_c, ulevels, nlevels, elem_area, edge_tri,
                             myDim_edge2D, eDim_edge2D):
-    def update_rhs(ed, state):
-        U_rhs, V_rhs = state
-        el = edge_tri[:, ed]
-        el = jnp.where(el[1] < 0, el.at[1].set(el[0]), el)
-        nzmin = jnp.max(ulevels[el]) - 1
-        nzmax = jnp.min(nlevels[el])
-        # Maximum depth
-        max_depth = u.shape[0]
-        update_u = jnp.zeros((max_depth,))
-        update_v = jnp.zeros((max_depth,))
-
-        def compute_rhs_updates(nz, updates):
-            update_u, update_v = updates
-            du = U_c[nz, el[0]] - U_c[nz, el[1]]
-            dv = V_c[nz, el[0]] - V_c[nz, el[1]]
-            updates = (
-                update_u.at[nz].set(du),
-                update_v.at[nz].set(dv),
-            )
-            return updates
-
-        update_u, update_v = lax.fori_loop(nzmin, nzmax, compute_rhs_updates, (update_u, update_v))
-
-        # Mask to apply only to the valid range
-        mask = (jnp.arange(max_depth) >= nzmin) & (jnp.arange(max_depth) < nzmax)
-
-        # Apply updates with masking
-        U_rhs = U_rhs.at[:, el[0]].add(jnp.where(mask, -update_u / elem_area[el[0]], 0))
-        V_rhs = V_rhs.at[:, el[0]].add(jnp.where(mask, -update_v / elem_area[el[0]], 0))
-        U_rhs = U_rhs.at[:, el[1]].add(jnp.where(mask, update_u / elem_area[el[1]], 0))
-        V_rhs = V_rhs.at[:, el[1]].add(jnp.where(mask, update_v / elem_area[el[1]], 0))
-
-        return U_rhs, V_rhs
-
-    U_rhs, V_rhs = lax.fori_loop(0, myDim_edge2D + eDim_edge2D, update_rhs, (U_rhs, V_rhs))
-
+    # Get edge elements and handle boundary conditions
+    el = edge_tri[:, :myDim_edge2D + eDim_edge2D]  # Shape: (2, myDim_edge2D + eDim_edge2D)
+    el = jnp.where(el[1] < 0, el.at[1].set(el[0]), el)
+    
+    # Calculate level ranges for each edge
+    nzmin = jnp.maximum(ulevels[el[0]], ulevels[el[1]]) - 1  # Shape: (myDim_edge2D + eDim_edge2D,)
+    nzmax = jnp.minimum(nlevels[el[0]], nlevels[el[1]])  # Shape: (myDim_edge2D + eDim_edge2D,)
+    
+    # Create level indices array
+    max_levels = 100  # Maximum possible number of levels
+    level_indices = jnp.arange(max_levels)[:, None]  # Shape: (max_levels, 1)
+    
+    # Create mask for valid levels
+    level_mask = (level_indices >= nzmin) & (level_indices < nzmax)  # Shape: (max_levels, myDim_edge2D + eDim_edge2D)
+    
+    # Calculate velocity differences for all levels and edges at once
+    du = U_c[level_indices, el[0]] - U_c[level_indices, el[1]]  # Shape: (max_levels, myDim_edge2D + eDim_edge2D)
+    dv = V_c[level_indices, el[0]] - V_c[level_indices, el[1]]
+    
+    # Apply level mask to differences
+    du = du * level_mask
+    dv = dv * level_mask
+    
+    # Prepare area denominators for updates
+    area_el0 = elem_area[el[0]]  # Shape: (myDim_edge2D + eDim_edge2D,)
+    area_el1 = elem_area[el[1]]
+    
+    # Calculate updates for each element
+    updates_u0 = -du / area_el0[None, :]  # Shape: (max_levels, myDim_edge2D + eDim_edge2D)
+    updates_v0 = -dv / area_el0[None, :]
+    updates_u1 = du / area_el1[None, :]
+    updates_v1 = dv / area_el1[None, :]
+    
+    # Create index arrays for scattering updates
+    level_idx = jnp.arange(max_levels)[:, None]  # Shape: (max_levels, 1)
+    edge_idx = jnp.arange(myDim_edge2D + eDim_edge2D)[None, :]  # Shape: (1, myDim_edge2D + eDim_edge2D)
+    
+    # Scatter updates to U_rhs and V_rhs using vectorized operations
+    U_rhs = U_rhs.at[level_idx, el[0]].add(updates_u0 * level_mask)
+    V_rhs = V_rhs.at[level_idx, el[0]].add(updates_v0 * level_mask)
+    U_rhs = U_rhs.at[level_idx, el[1]].add(updates_u1 * level_mask)
+    V_rhs = V_rhs.at[level_idx, el[1]].add(updates_v1 * level_mask)
+    
     return U_rhs, V_rhs, U_c, V_c
 
 @partial(jax.jit, static_argnums=(14,))  # Only myDim_elem2D is static
@@ -892,7 +789,7 @@ def compute_hbar_ale(u, v, water_flux, helem, edges, edge_tri, edge_cross_dxdy,
     # Create level masks for first elements
     nz = u.shape[0]
     level_indices = jnp.arange(nz)[:, None]  # (nz, 1)
-    level_indices = jnp.broadcast_to(level_indices, (nz, myDim_edge2D))  # (nz, myDim_edge2D)
+    level_indices = jnp.broadcast_to(level_indices, (nz, myDim_edge2D))
     
     # Mask for valid levels in first elements
     mask1 = (level_indices >= nzmin1) & (level_indices < nzmax1)  # (nz, myDim_edge2D)
